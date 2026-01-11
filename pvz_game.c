@@ -17,6 +17,7 @@ extern const unsigned char gImage_background1_hd[];
 #include "PeaShooter_ani.h"
 #include "SunFlower_ani.h"
 #include "walk_ani.h"
+#include "ProjectilePea.h"
 
 // Forward declarations
 int rects_overlap(int x1, int y1, int w1, int h1, int x2, int y2, int w2, int h2);
@@ -64,6 +65,7 @@ void game_init(GameState *game)
             game->grid[i][j].plant = PLANT_NONE;
             game->grid[i][j].animation_frame = 0;
             game->grid[i][j].sun_spawn_counter = 0;
+            game->grid[i][j].shoot_counter = 0;
         }
     }
     
@@ -81,6 +83,15 @@ void game_init(GameState *game)
         game->zombies[i].active = 0;
         game->zombies[i].prev_x = -1;
         game->zombies[i].prev_y = -1;
+        game->zombies[i].health = 0;  // Will be set to ZOMBIE_MAX_HEALTH when spawned
+    }
+
+    // Initialize peas
+    game->num_active_peas = 0;
+    for (i = 0; i < MAX_PEAS; i++) {
+        game->peas[i].active = 0;
+        game->peas[i].prev_x = -1;
+        game->peas[i].prev_y = -1;
     }
 
     printf("Game initialized: sun=%d\n", game->sun_count);
@@ -129,7 +140,9 @@ void draw_sprite_transparent(u8 *framebuf, int x, int y, const u8 *sprite_data, 
             g = sprite_data[sprite_idx + 1];
             r = sprite_data[sprite_idx + 2];
 
-            if (b == 0 && g == 0 && r == 0) {
+            // Treat dark colors (near-black) as transparent
+            // This handles black edges and semi-dark backgrounds
+            if ((int)b + (int)g + (int)r < 30) {
                 continue;
             }
 
@@ -194,7 +207,9 @@ void draw_sprite_scaled_transparent(u8 *framebuf, int dst_x, int dst_y, int dst_
             g = sprite_data[sprite_idx + 1];
             r = sprite_data[sprite_idx + 2];
 
-            if (b == 0 && g == 0 && r == 0) {
+            // Treat dark colors (near-black) as transparent
+            // This handles black edges and semi-dark backgrounds
+            if ((int)b + (int)g + (int)r < 30) {
                 continue;
             }
 
@@ -966,9 +981,12 @@ void game_spawn_zombie(GameState *game)
             // Start at random animation frame for variety
             game->zombies[i].animation_frame = rand() % (ZOMBIE_ROWS * ZOMBIE_COLS);
 
+            // Initialize health
+            game->zombies[i].health = ZOMBIE_MAX_HEALTH;
+
             game->num_active_zombies++;
 
-            printf("Zombie spawned at row %d\n", game->zombies[i].row);
+            printf("Zombie spawned at row %d with %d health\n", game->zombies[i].row, game->zombies[i].health);
             break;
         }
     }
@@ -1216,6 +1234,244 @@ void game_draw_zombies(GameState *game, u8 *framebuf)
             // Zombie died and erased, set position to -1 to avoid re-erase
             game->zombies[i].prev_x = -1;
             game->zombies[i].prev_y = -1;
+        }
+    }
+}
+
+/* ============================================================ */
+/*                     PEA FUNCTIONS                            */
+/* ============================================================ */
+
+/**
+ * Shoot a pea from peashooter at given position
+ */
+void game_shoot_pea(GameState *game, int row, int col)
+{
+    int i;
+
+    // Find an inactive pea slot
+    for (i = 0; i < MAX_PEAS; i++) {
+        if (!game->peas[i].active) {
+            // Activate pea
+            game->peas[i].active = 1;
+            game->peas[i].row = row;
+
+            // Calculate pea start position (center of plant cell)
+            int cell_x = GRID_START_X + col * GRID_WIDTH;
+            int cell_y = GRID_START_Y + row * GRID_HEIGHT;
+
+            game->peas[i].x = (float)(cell_x + GRID_WIDTH - PEA_SIZE / 2);
+            game->peas[i].y = (float)(cell_y + GRID_HEIGHT / 2 - PEA_SIZE / 2);
+
+            // Initialize position tracking
+            game->peas[i].prev_x = (int)game->peas[i].x;
+            game->peas[i].prev_y = (int)game->peas[i].y;
+
+            game->num_active_peas++;
+
+            printf("Pea shot from row %d, col %d\n", row, col);
+            break;
+        }
+    }
+}
+
+/**
+ * Update all active peas - movement and collision detection
+ */
+void game_update_peas(GameState *game)
+{
+    int i, row, col;
+
+    // Update peashooter shoot counters and shoot peas
+    for (row = 0; row < GRID_ROWS; row++) {
+        for (col = 0; col < GRID_COLS; col++) {
+            if (game->grid[row][col].plant == PLANT_PEASHOOTER) {
+                game->grid[row][col].shoot_counter++;
+
+                // Shoot pea every PEA_SHOOT_INTERVAL ticks (1.45 seconds)
+                if (game->grid[row][col].shoot_counter >= PEA_SHOOT_INTERVAL) {
+                    game->grid[row][col].shoot_counter = 0;
+                    game_shoot_pea(game, row, col);
+                }
+            }
+        }
+    }
+
+    // Update pea positions
+    for (i = 0; i < MAX_PEAS; i++) {
+        if (game->peas[i].active) {
+            // Move pea to the right
+            game->peas[i].x += PEA_SPEED;
+
+            // Check if pea went off screen
+            if (game->peas[i].x > SCREEN_WIDTH) {
+                game->peas[i].active = 0;
+                game->num_active_peas--;
+            }
+        }
+    }
+
+    // Check pea-zombie collisions
+    game_check_pea_zombie_collision(game);
+}
+
+/**
+ * Check collision between peas and zombies
+ */
+void game_check_pea_zombie_collision(GameState *game)
+{
+    int i, j;
+
+    // Check each active pea
+    for (i = 0; i < MAX_PEAS; i++) {
+        if (!game->peas[i].active) continue;
+
+        int pea_x = (int)game->peas[i].x;
+        int pea_y = (int)game->peas[i].y;
+        int pea_row = game->peas[i].row;
+
+        // Check collision with each zombie in the same row
+        for (j = 0; j < MAX_ZOMBIES; j++) {
+            if (!game->zombies[j].active) continue;
+            if (game->zombies[j].row != pea_row) continue;
+
+            int zombie_x = (int)game->zombies[j].x;
+            int zombie_y = (int)game->zombies[j].y + ZOMBIE_Y_OFFSET;
+
+            // Check if pea overlaps with zombie
+            if (rects_overlap(pea_x, pea_y, PEA_SIZE, PEA_SIZE,
+                            zombie_x, zombie_y, ZOMBIE_DISPLAY_WIDTH, ZOMBIE_DISPLAY_HEIGHT)) {
+                // Hit! Damage zombie
+                game->zombies[j].health -= PEA_DAMAGE;
+
+                // Deactivate pea
+                game->peas[i].active = 0;
+                game->num_active_peas--;
+
+                printf("Pea hit zombie! Zombie health: %d\n", game->zombies[j].health);
+
+                // Check if zombie died
+                if (game->zombies[j].health <= 0) {
+                    game->zombies[j].active = 0;
+                    game->num_active_zombies--;
+                    printf("Zombie died!\n");
+                }
+
+                break;  // Pea can only hit one zombie
+            }
+        }
+    }
+}
+
+/**
+ * Draw all peas with two-phase dirty rect optimization
+ */
+void game_draw_peas(GameState *game, u8 *framebuf)
+{
+    int i, j, row, col;
+    extern const unsigned char gImage_ProjectilePea[];
+
+    // --- PHASE 1: ERASE ALL OLD POSITIONS ---
+    for (i = 0; i < MAX_PEAS; i++) {
+        int prev_x = game->peas[i].prev_x;
+        int prev_y = game->peas[i].prev_y;
+        int need_erase = 0;
+
+        // Determine if we need to erase
+        if (game->peas[i].active) {
+            need_erase = 1;
+        } else if (prev_x != -1) {
+            need_erase = 1;
+        }
+
+        if (need_erase) {
+            int curr_x = game->peas[i].active ? (int)game->peas[i].x : prev_x;
+
+            // Calculate erase region that covers the entire movement trail
+            // This ensures no ghosting even with fast movement
+            int erase_x = (prev_x < curr_x ? prev_x : curr_x) - PEA_ERASE_MARGIN;
+            int erase_y = prev_y - PEA_ERASE_MARGIN;
+            int erase_w = ((prev_x < curr_x ? curr_x : prev_x) - erase_x) + PEA_SIZE + (PEA_ERASE_MARGIN * 2);
+            int erase_h = PEA_SIZE + (PEA_ERASE_MARGIN * 2);
+
+            // Boundary check
+            if (erase_x < 0) { erase_w += erase_x; erase_x = 0; }
+            if (erase_y < 0) { erase_h += erase_y; erase_y = 0; }
+            if (erase_x + erase_w > SCREEN_WIDTH) erase_w = SCREEN_WIDTH - erase_x;
+            if (erase_y + erase_h > SCREEN_HEIGHT) erase_h = SCREEN_HEIGHT - erase_y;
+
+            // 1. Restore background (SAFE - avoids UI areas)
+            restore_background_rect_safe(framebuf, erase_x, erase_y, erase_w, erase_h);
+
+            // 2. Redraw UI elements if overlapped
+            redraw_ui_if_overlapped(game, framebuf, erase_x, erase_y, erase_w, erase_h);
+
+            // 3. Redraw plants that were covered
+            for (row = 0; row < GRID_ROWS; row++) {
+                for (col = 0; col < GRID_COLS; col++) {
+                    if (game->grid[row][col].plant != PLANT_NONE) {
+                        int cell_x = GRID_START_X + col * GRID_WIDTH;
+                        int cell_y = GRID_START_Y + row * GRID_HEIGHT;
+
+                        if (rects_overlap(erase_x, erase_y, erase_w, erase_h,
+                                        cell_x, cell_y, GRID_WIDTH, GRID_HEIGHT)) {
+                            draw_single_plant_cell(game, framebuf, row, col);
+                        }
+                    }
+                }
+            }
+
+            // 4. Redraw suns that were covered
+            for (j = 0; j < MAX_SUNS; j++) {
+                if (game->suns[j].active) {
+                    int sun_x = (int)game->suns[j].x;
+                    int sun_y = (int)game->suns[j].y;
+
+                    if (rects_overlap(erase_x, erase_y, erase_w, erase_h,
+                                    sun_x, sun_y, SUN_SIZE, SUN_SIZE)) {
+                        draw_sprite_transparent(framebuf, sun_x, sun_y,
+                                              gImage_Sun, SUN_SIZE, SUN_SIZE);
+                    }
+                }
+            }
+
+            // 5. Redraw zombies that were covered
+            for (j = 0; j < MAX_ZOMBIES; j++) {
+                if (game->zombies[j].active) {
+                    int zombie_x = (int)game->zombies[j].x;
+                    int zombie_y = (int)game->zombies[j].y + ZOMBIE_Y_OFFSET;
+
+                    if (rects_overlap(erase_x, erase_y, erase_w, erase_h,
+                                    zombie_x, zombie_y, ZOMBIE_DISPLAY_WIDTH, ZOMBIE_DISPLAY_HEIGHT)) {
+                        draw_zombie_sprite(framebuf, (int)game->zombies[j].x, (int)game->zombies[j].y,
+                                         gImage_walk_ani, game->zombies[j].animation_frame);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- PHASE 2: DRAW ALL NEW PEA POSITIONS ---
+    for (i = 0; i < MAX_PEAS; i++) {
+        if (game->peas[i].active) {
+            int curr_x = (int)game->peas[i].x;
+            int curr_y = (int)game->peas[i].y;
+
+            if (curr_x >= 0 && curr_y >= 0 &&
+                curr_x + PEA_SIZE <= SCREEN_WIDTH &&
+                curr_y + PEA_SIZE <= SCREEN_HEIGHT) {
+                draw_sprite_transparent(framebuf, curr_x, curr_y,
+                                      gImage_ProjectilePea, PEA_SIZE, PEA_SIZE);
+            }
+
+            // Update position tracking
+            game->peas[i].prev_x = curr_x;
+            game->peas[i].prev_y = curr_y;
+        }
+        else {
+            // Pea died and erased, set position to -1 to avoid re-erase
+            game->peas[i].prev_x = -1;
+            game->peas[i].prev_y = -1;
         }
     }
 }

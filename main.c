@@ -34,6 +34,7 @@ volatile u8 global_need_full_redraw = 0;      // Set when planting or UI changes
 volatile u8 global_need_animation_redraw = 0; // Set when only animation updates
 volatile u8 global_need_sun_redraw = 0;       // Set when suns move
 volatile u8 global_need_zombie_redraw = 0;    // Set when zombies move
+volatile u8 global_need_pea_redraw = 0;       // Set when peas move
 
 // Game state
 GameState game;
@@ -121,6 +122,7 @@ int main(void)
             global_need_animation_redraw = 0; // Clear animation flag too
             global_need_sun_redraw = 0;       // Clear sun flag too
             global_need_zombie_redraw = 0;    // Clear zombie flag too
+            global_need_pea_redraw = 0;       // Clear pea flag too
 
             // CRITICAL FIX: Update ALL buffers when UI changes
             // With triple buffering, if we only update one buffer, when we rotate
@@ -129,6 +131,7 @@ int main(void)
                 memcpy(DispCtrl_Inst.framePtr[i], gImage_background1_hd, DEMO_MAX_FRAME);
                 game_draw_full(&game, (u8 *)DispCtrl_Inst.framePtr[i]);
                 game_draw_suns(&game, (u8 *)DispCtrl_Inst.framePtr[i]);  // Draw suns too
+                game_draw_peas(&game, (u8 *)DispCtrl_Inst.framePtr[i]);  // Draw peas too
                 game_draw_zombies(&game, (u8 *)DispCtrl_Inst.framePtr[i]); // Draw zombies too
                 Xil_DCacheFlushRange((unsigned int)DispCtrl_Inst.framePtr[i], DEMO_MAX_FRAME);
             }
@@ -138,11 +141,13 @@ int main(void)
             XAxiVdma_StartParking(&VDMA_Inst, draw_frame, XAXIVDMA_READ);
             DispCtrl_Inst.curFrame = draw_frame;
         }
-        // Check if only animation, sun, or zombie redraw is needed
-        else if (global_need_animation_redraw || global_need_sun_redraw || global_need_zombie_redraw) {
+        // Check if only animation, sun, zombie, or pea redraw is needed
+        else if (global_need_animation_redraw || global_need_sun_redraw ||
+                 global_need_zombie_redraw || global_need_pea_redraw) {
             global_need_animation_redraw = 0;
             global_need_sun_redraw = 0;
             global_need_zombie_redraw = 0;
+            global_need_pea_redraw = 0;
 
             // Calculate next write frame
             u32 draw_frame = (DispCtrl_Inst.curFrame + 1) % DISPLAY_NUM_FRAMES;
@@ -150,9 +155,11 @@ int main(void)
             // OPTIMIZED: Only redraw what changed
             // - Plant cells with animation
             // - Sun positions (with dirty rect optimization)
+            // - Pea positions (with dirty rect optimization)
             // - Zombie positions (with dirty rect optimization)
             game_draw_animation(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
             game_draw_suns(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
+            game_draw_peas(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
             game_draw_zombies(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
 
             // Flush cache and switch display
@@ -237,6 +244,13 @@ static void Timer_IRQ_Handler(void *CallBackRef)
     if (game.num_active_zombies > 0) {
         // Zombies are active and moving - need to redraw them
         global_need_zombie_redraw = 1;
+    }
+
+    // Update pea physics and collision detection
+    game_update_peas(&game);
+    if (game.num_active_peas > 0) {
+        // Peas are active and moving - need to redraw them
+        global_need_pea_redraw = 1;
     }
 
     // Handle touch input

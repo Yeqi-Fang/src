@@ -97,7 +97,8 @@ typedef struct {
 typedef struct {
     PlantType plant;
     int animation_frame;
-    int sun_spawn_counter;  // Counter for sun production (only for sunflowers)
+    int sun_spawn_counter;    // Counter for sun production (only for sunflowers)
+    int shoot_counter;        // Counter for pea shooting (only for peashooters)
 } GridCell;
 
 /* Sun object for collection */
@@ -138,7 +139,25 @@ typedef struct {
     int row;              // Which lawn row the zombie is in (0-4)
     int animation_frame;  // Current animation frame (0-47, 6x8=48 frames)
     u8 active;            // Is this zombie active?
+    int health;           // Zombie health (10 = full health, 0 = dead)
 } Zombie;
+
+/* Pea projectile parameters */
+#define PEA_SIZE             24     // Pea sprite is 28x28
+#define MAX_PEAS             50     // Maximum active peas
+#define PEA_SPEED            3.0f   // Pea movement speed (pixels per tick)
+#define PEA_DAMAGE           1      // Damage per pea hit
+#define PEA_SHOOT_INTERVAL   145    // 1.45 seconds at 100Hz = 145 ticks
+#define PEA_ERASE_MARGIN     12     // Extra pixels to erase (prevents artifacts) - increased from 5 to 12
+#define ZOMBIE_MAX_HEALTH    10     // Zombie needs 10 peas to die
+
+/* Pea projectile object */
+typedef struct {
+    float x, y;           // Current position (float for smooth movement)
+    int prev_x, prev_y;   // Previous integer position (for dirty rect tracking)
+    int row;              // Which lawn row the pea is in (0-4)
+    u8 active;            // Is this pea active?
+} Pea;
 
 /* Game state */
 typedef struct {
@@ -155,6 +174,8 @@ typedef struct {
     int num_active_zombies;
     int zombie_spawn_counter;
     int zombie_animation_counter;
+    Pea peas[MAX_PEAS];
+    int num_active_peas;
 } GameState;
 
 /* Function declarations */
@@ -193,5 +214,11 @@ void game_spawn_zombie(GameState *game);
 void game_update_zombies(GameState *game);
 void game_draw_zombies(GameState *game, u8 *framebuf);
 void draw_zombie_sprite(u8 *framebuf, int dst_x, int dst_y, const u8 *sheet_data, int frame_index);
+
+/* Pea functions */
+void game_shoot_pea(GameState *game, int row, int col);
+void game_update_peas(GameState *game);
+void game_draw_peas(GameState *game, u8 *framebuf);
+void game_check_pea_zombie_collision(GameState *game);
 
 #endif // PVZ_GAME_H
