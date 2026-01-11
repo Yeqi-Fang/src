@@ -1,19 +1,19 @@
 /* ------------------------------------------------------------ */
-/*                  PVZ Game Logic                              */
+/*            PVZ Game Logic (Optimized Version)                */
 /* ------------------------------------------------------------ */
 #include "pvz_game.h"
 #include <stdio.h>
 #include <string.h>
 
-// Include image header files (user provided locally)
-#include "background1_hd.h"
-#include "SeedBank.h"
+// Include image header files
+extern const unsigned char gImage_background1_hd[];
 #include "SeedPacket.h"
 #include "SunBank.h"
+#include "SeedBank.h"
 #include "PeaShooter.h"
 #include "SunFlower.h"
-#include "PeaShooter_ani.h"   // Animation sprite sheet for PeaShooter
-#include "SunFlower_ani.h"    // Animation sprite sheet for SunFlower
+#include "PeaShooter_ani.h"
+#include "SunFlower_ani.h"
 
 /* Number font - simple 7-segment style digits (10x16) */
 static const u8 digit_patterns[10][16] = {
@@ -36,10 +36,11 @@ void game_init(GameState *game)
 {
     int i, j;
     
-    // Initial sun count
     game->sun_count = 150;
     game->selected_card = -1;
-    game->animation_counter = 0;  // Initialize animation counter
+    game->animation_counter = 0;
+    game->prev_sun_count = 150;
+    game->prev_selected_card = -1;
     
     // Initialize cards
     game->cards[0].type = PLANT_SUNFLOWER;
@@ -54,7 +55,7 @@ void game_init(GameState *game)
     for (i = 0; i < GRID_ROWS; i++) {
         for (j = 0; j < GRID_COLS; j++) {
             game->grid[i][j].plant = PLANT_NONE;
-            game->grid[i][j].animation_frame = 0;  // Initialize animation frame
+            game->grid[i][j].animation_frame = 0;
         }
     }
     
@@ -69,7 +70,6 @@ void draw_sprite(u8 *framebuf, int x, int y, const u8 *sprite_data, int w, int h
     int i, j;
     u32 fb_idx, sprite_idx;
     
-    // Boundary check
     if (x < 0 || y < 0 || x + w > SCREEN_WIDTH || y + h > SCREEN_HEIGHT)
         return;
     
@@ -78,15 +78,15 @@ void draw_sprite(u8 *framebuf, int x, int y, const u8 *sprite_data, int w, int h
             fb_idx = ((y + i) * SCREEN_WIDTH + (x + j)) * 3;
             sprite_idx = (i * w + j) * 3;
             
-            framebuf[fb_idx]     = sprite_data[sprite_idx];     // B
-            framebuf[fb_idx + 1] = sprite_data[sprite_idx + 1]; // G
-            framebuf[fb_idx + 2] = sprite_data[sprite_idx + 2]; // R
+            framebuf[fb_idx]     = sprite_data[sprite_idx];
+            framebuf[fb_idx + 1] = sprite_data[sprite_idx + 1];
+            framebuf[fb_idx + 2] = sprite_data[sprite_idx + 2];
         }
     }
 }
 
 /**
- * Draw sprite with transparency (skip pure black pixels)
+ * Draw sprite with transparency
  */
 void draw_sprite_transparent(u8 *framebuf, int x, int y, const u8 *sprite_data, int w, int h)
 {
@@ -94,7 +94,6 @@ void draw_sprite_transparent(u8 *framebuf, int x, int y, const u8 *sprite_data, 
     u32 fb_idx, sprite_idx;
     u8 b, g, r;
 
-    // Boundary check
     if (x < 0 || y < 0 || x + w > SCREEN_WIDTH || y + h > SCREEN_HEIGHT)
         return;
 
@@ -106,7 +105,6 @@ void draw_sprite_transparent(u8 *framebuf, int x, int y, const u8 *sprite_data, 
             g = sprite_data[sprite_idx + 1];
             r = sprite_data[sprite_idx + 2];
 
-            // Skip pure black pixels (transparent area)
             if (b == 0 && g == 0 && r == 0) {
                 continue;
             }
@@ -120,7 +118,7 @@ void draw_sprite_transparent(u8 *framebuf, int x, int y, const u8 *sprite_data, 
 }
 
 /**
- * Draw scaled sprite (for plant icons on cards)
+ * Draw scaled sprite
  */
 void draw_sprite_scaled(u8 *framebuf, int dst_x, int dst_y, int dst_w, int dst_h,
                         const u8 *sprite_data, int src_w, int src_h)
@@ -129,22 +127,20 @@ void draw_sprite_scaled(u8 *framebuf, int dst_x, int dst_y, int dst_w, int dst_h
     u32 fb_idx, sprite_idx;
     int src_x, src_y;
     
-    // Boundary check
     if (dst_x < 0 || dst_y < 0 || dst_x + dst_w > SCREEN_WIDTH || dst_y + dst_h > SCREEN_HEIGHT)
         return;
     
     for (i = 0; i < dst_h; i++) {
         for (j = 0; j < dst_w; j++) {
-            // Nearest neighbor interpolation
             src_x = (j * src_w) / dst_w;
             src_y = (i * src_h) / dst_h;
             
             fb_idx = ((dst_y + i) * SCREEN_WIDTH + (dst_x + j)) * 3;
             sprite_idx = (src_y * src_w + src_x) * 3;
             
-            framebuf[fb_idx]     = sprite_data[sprite_idx];     // B
-            framebuf[fb_idx + 1] = sprite_data[sprite_idx + 1]; // G
-            framebuf[fb_idx + 2] = sprite_data[sprite_idx + 2]; // R
+            framebuf[fb_idx]     = sprite_data[sprite_idx];
+            framebuf[fb_idx + 1] = sprite_data[sprite_idx + 1];
+            framebuf[fb_idx + 2] = sprite_data[sprite_idx + 2];
         }
     }
 }
@@ -160,13 +156,11 @@ void draw_sprite_scaled_transparent(u8 *framebuf, int dst_x, int dst_y, int dst_
     int src_x, src_y;
     u8 b, g, r;
 
-    // Boundary check
     if (dst_x < 0 || dst_y < 0 || dst_x + dst_w > SCREEN_WIDTH || dst_y + dst_h > SCREEN_HEIGHT)
         return;
 
     for (i = 0; i < dst_h; i++) {
         for (j = 0; j < dst_w; j++) {
-            // Nearest neighbor interpolation
             src_x = (j * src_w) / dst_w;
             src_y = (i * src_h) / dst_h;
 
@@ -176,7 +170,6 @@ void draw_sprite_scaled_transparent(u8 *framebuf, int dst_x, int dst_y, int dst_
             g = sprite_data[sprite_idx + 1];
             r = sprite_data[sprite_idx + 2];
 
-            // Skip pure black pixels (transparent area)
             if (b == 0 && g == 0 && r == 0) {
                 continue;
             }
@@ -210,9 +203,9 @@ void draw_number(u8 *framebuf, int x, int y, int number)
                     col = x + i * 12 + bit;
                     if (col >= 0 && col < SCREEN_WIDTH && y + row >= 0 && y + row < SCREEN_HEIGHT) {
                         fb_idx = ((y + row) * SCREEN_WIDTH + col) * 3;
-                        framebuf[fb_idx]     = 0;    // B
-                        framebuf[fb_idx + 1] = 0;    // G
-                        framebuf[fb_idx + 2] = 0;    // R
+                        framebuf[fb_idx]     = 0;
+                        framebuf[fb_idx + 1] = 0;
+                        framebuf[fb_idx + 2] = 0;
                     }
                 }
             }
@@ -221,8 +214,7 @@ void draw_number(u8 *framebuf, int x, int y, int number)
 }
 
 /**
- * Extract a frame from sprite sheet and draw it scaled with transparency
- * sprite sheet: 400x400, 5x5 grid, each frame 80x80
+ * Extract and draw frame from sprite sheet with scaling and transparency
  */
 void draw_sprite_from_sheet(u8 *framebuf, int dst_x, int dst_y, int dst_w, int dst_h,
                             const u8 *sheet_data, int frame_index)
@@ -234,32 +226,26 @@ void draw_sprite_from_sheet(u8 *framebuf, int dst_x, int dst_y, int dst_w, int d
     u32 sheet_idx;
     u8 b, g, r;
 
-    // Boundary check
     if (dst_x < 0 || dst_y < 0 || dst_x + dst_w > SCREEN_WIDTH || dst_y + dst_h > SCREEN_HEIGHT)
         return;
 
-    // Calculate frame position in sprite sheet (5x5 grid)
     int frame_row = frame_index / SPRITE_COLS;
     int frame_col = frame_index % SPRITE_COLS;
 
-    src_x_offset = frame_col * FRAME_SIZE;  // 80 * col
-    src_y_offset = frame_row * FRAME_SIZE;  // 80 * row
+    src_x_offset = frame_col * FRAME_SIZE;
+    src_y_offset = frame_row * FRAME_SIZE;
 
-    // Draw with scaling and transparency
     for (i = 0; i < dst_h; i++) {
         for (j = 0; j < dst_w; j++) {
-            // Nearest neighbor interpolation
             src_x = src_x_offset + (j * FRAME_SIZE) / dst_w;
             src_y = src_y_offset + (i * FRAME_SIZE) / dst_h;
 
-            // Calculate index in sprite sheet (400x400)
             sheet_idx = (src_y * SPRITE_SHEET_SIZE + src_x) * 3;
 
             b = sheet_data[sheet_idx];
             g = sheet_data[sheet_idx + 1];
             r = sheet_data[sheet_idx + 2];
 
-            // Skip pure black pixels (transparent area)
             if (b == 0 && g == 0 && r == 0) {
                 continue;
             }
@@ -274,7 +260,6 @@ void draw_sprite_from_sheet(u8 *framebuf, int dst_x, int dst_y, int dst_w, int d
 
 /**
  * Update animation for all plants
- * Returns 1 if animation frame changed, 0 otherwise
  */
 int game_update_animation(GameState *game)
 {
@@ -283,17 +268,15 @@ int game_update_animation(GameState *game)
 
     game->animation_counter++;
 
-    // Update animation frame every FRAMES_PER_UPDATE cycles (approx 12 fps)
     if (game->animation_counter >= FRAMES_PER_UPDATE) {
         game->animation_counter = 0;
 
-        // Update each planted cell
         for (i = 0; i < GRID_ROWS; i++) {
             for (j = 0; j < GRID_COLS; j++) {
                 if (game->grid[i][j].plant != PLANT_NONE) {
                     game->grid[i][j].animation_frame++;
                     if (game->grid[i][j].animation_frame >= ANIMATION_FRAMES) {
-                        game->grid[i][j].animation_frame = 0;  // Loop animation
+                        game->grid[i][j].animation_frame = 0;
                     }
                     frame_changed = 1;
                 }
@@ -307,7 +290,7 @@ int game_update_animation(GameState *game)
 /**
  * Draw darkened sprite (for selected cards)
  */
-static void draw_sprite_darkened(u8 *framebuf, int x, int y, const u8 *sprite_data, int w, int h)
+void draw_sprite_darkened(u8 *framebuf, int x, int y, const u8 *sprite_data, int w, int h)
 {
     int i, j;
     u32 fb_idx, sprite_idx;
@@ -320,7 +303,6 @@ static void draw_sprite_darkened(u8 *framebuf, int x, int y, const u8 *sprite_da
             fb_idx = ((y + i) * SCREEN_WIDTH + (x + j)) * 3;
             sprite_idx = (i * w + j) * 3;
             
-            // Darken by 50%
             framebuf[fb_idx]     = sprite_data[sprite_idx] / 2;
             framebuf[fb_idx + 1] = sprite_data[sprite_idx + 1] / 2;
             framebuf[fb_idx + 2] = sprite_data[sprite_idx + 2] / 2;
@@ -329,25 +311,89 @@ static void draw_sprite_darkened(u8 *framebuf, int x, int y, const u8 *sprite_da
 }
 
 /**
- * Draw game interface
+ * Restore background rectangle from original background image
  */
-void game_draw(GameState *game, u8 *framebuf)
+void restore_background_rect(u8 *framebuf, int x, int y, int w, int h)
+{
+    int i, j;
+    u32 fb_idx;
+
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x + w > SCREEN_WIDTH) w = SCREEN_WIDTH - x;
+    if (y + h > SCREEN_HEIGHT) h = SCREEN_HEIGHT - y;
+
+    for (i = 0; i < h; i++) {
+        for (j = 0; j < w; j++) {
+            fb_idx = ((y + i) * SCREEN_WIDTH + (x + j)) * 3;
+            framebuf[fb_idx]     = gImage_background1_hd[fb_idx];
+            framebuf[fb_idx + 1] = gImage_background1_hd[fb_idx + 1];
+            framebuf[fb_idx + 2] = gImage_background1_hd[fb_idx + 2];
+        }
+    }
+}
+
+/**
+ * OPTIMIZED: Draw only plants (for animation updates)
+ * This function only redraws grid cells that have plants
+ * Skips UI elements and empty cells completely
+ */
+void game_draw_animation(GameState *game, u8 *framebuf)
+{
+    int i, j;
+
+    // Only iterate through grid cells that have plants
+    for (i = 0; i < GRID_ROWS; i++) {
+        for (j = 0; j < GRID_COLS; j++) {
+            if (game->grid[i][j].plant != PLANT_NONE) {
+                // Calculate cell position
+                int cell_x = GRID_START_X + j * GRID_WIDTH;
+                int cell_y = GRID_START_Y + i * GRID_HEIGHT;
+
+                // Restore background for this cell only
+                restore_background_rect(framebuf, cell_x, cell_y, GRID_WIDTH, GRID_HEIGHT);
+
+                // Draw the animated plant
+                int plant_x = cell_x + (GRID_WIDTH - PLANT_SIZE) / 2;
+                int plant_y = cell_y + (GRID_HEIGHT - PLANT_SIZE) / 2;
+
+                const u8 *sheet_data = (game->grid[i][j].plant == PLANT_SUNFLOWER) ?
+                                       gImage_SunFlower_ani : gImage_PeaShooter_ani;
+
+                draw_sprite_from_sheet(framebuf, plant_x, plant_y, PLANT_SIZE, PLANT_SIZE,
+                                      sheet_data, game->grid[i][j].animation_frame);
+            }
+        }
+    }
+
+    // Update tracking variables
+    game->prev_sun_count = game->sun_count;
+    game->prev_selected_card = game->selected_card;
+}
+
+/**
+ * FULL REDRAW: Draw complete game state (UI + all plants)
+ * Called when: initial draw, planting, or UI state changes
+ */
+void game_draw_full(GameState *game, u8 *framebuf)
 {
     int i, j;
     int card_x, card_y;
     const u8 *plant_data;
+
+    // Draw UI elements (sun bank and seed cards)
     
-    // 1. Draw background
-    memcpy(framebuf, gImage_background1_hd, SCREEN_WIDTH * SCREEN_HEIGHT * 3);
-    
-    // 2. Draw seed bank
-    draw_sprite(framebuf, SEEDBANK_X, SEEDBANK_Y, gImage_SeedBank, 357, 70);
-    
-    // 3. Draw sun bank
-    draw_sprite(framebuf, SUNBANK_X, SUNBANK_Y, gImage_SunBank, 63, 70);
+    // Draw sun bank area
+    restore_background_rect(framebuf, SUNBANK_X, SUNBANK_Y, 93, 70);
+    draw_sprite_transparent(framebuf, SUNBANK_X, SUNBANK_Y, gImage_SunBank, 63, 70);
     draw_number(framebuf, SUNBANK_X + 10, SUNBANK_Y + 45, game->sun_count);
-    
-    // 4. Draw plant cards
+
+    // Draw seed bank area
+    int bank_width = 357;
+    restore_background_rect(framebuf, SEEDBANK_X, SEEDBANK_Y, bank_width, 70);
+    draw_sprite_transparent(framebuf, SEEDBANK_X, SEEDBANK_Y, gImage_SeedBank, bank_width, 70);
+
+    // Draw seed cards
     for (i = 0; i < NUM_CARDS; i++) {
         card_x = SEEDBANK_X + 10 + i * (CARD_WIDTH + CARD_SPACING);
         card_y = SEEDBANK_Y + 5;
@@ -359,47 +405,52 @@ void game_draw(GameState *game, u8 *framebuf)
             draw_sprite(framebuf, card_x, card_y, gImage_SeedPacket, CARD_WIDTH, CARD_HEIGHT);
         }
         
-        // Draw plant icon on card (scaled + transparent)
+        // Draw plant icon
         plant_data = (game->cards[i].type == PLANT_SUNFLOWER) ? gImage_SunFlower : gImage_PeaShooter;
-        
         int icon_x = card_x + (CARD_WIDTH - PLANT_ICON_SIZE) / 2;
         int icon_y = card_y + 5;
         
-        // Use transparent drawing
         draw_sprite_scaled_transparent(framebuf, icon_x, icon_y, PLANT_ICON_SIZE, PLANT_ICON_SIZE,
-                                      plant_data, 90, 90);
+                                       plant_data, 90, 90);
 
         if (game->cards[i].selected) {
-            // Selected state, darken again
             for (int py = 0; py < PLANT_ICON_SIZE; py++) {
                 for (int px = 0; px < PLANT_ICON_SIZE; px++) {
                     u32 idx = ((icon_y + py) * SCREEN_WIDTH + (icon_x + px)) * 3;
-                    framebuf[idx] = framebuf[idx] / 2;
-                    framebuf[idx + 1] = framebuf[idx + 1] / 2;
-                    framebuf[idx + 2] = framebuf[idx + 2] / 2;
+                    framebuf[idx] /= 2;
+                    framebuf[idx + 1] /= 2;
+                    framebuf[idx + 2] /= 2;
                 }
             }
         }
     }
-    
-    // 5. Draw planted plants (use animation sprite sheet)
+
+    // Draw all plants (iterate all cells, but only draw if plant exists)
     for (i = 0; i < GRID_ROWS; i++) {
         for (j = 0; j < GRID_COLS; j++) {
+            int cell_x = GRID_START_X + j * GRID_WIDTH;
+            int cell_y = GRID_START_Y + i * GRID_HEIGHT;
+
+            // Restore background for this cell
+            restore_background_rect(framebuf, cell_x, cell_y, GRID_WIDTH, GRID_HEIGHT);
+
+            // Draw plant if exists
             if (game->grid[i][j].plant != PLANT_NONE) {
-                // Calculate plant position (centered in grid)
-                int plant_x = GRID_START_X + j * GRID_WIDTH + (GRID_WIDTH - PLANT_SIZE) / 2;
-                int plant_y = GRID_START_Y + i * GRID_HEIGHT + (GRID_HEIGHT - PLANT_SIZE) / 2;
+                int plant_x = cell_x + (GRID_WIDTH - PLANT_SIZE) / 2;
+                int plant_y = cell_y + (GRID_HEIGHT - PLANT_SIZE) / 2;
                 
-                // Get animation sprite sheet
                 const u8 *sheet_data = (game->grid[i][j].plant == PLANT_SUNFLOWER) ?
                                        gImage_SunFlower_ani : gImage_PeaShooter_ani;
 
-                // Draw current animation frame from sprite sheet
                 draw_sprite_from_sheet(framebuf, plant_x, plant_y, PLANT_SIZE, PLANT_SIZE,
                                       sheet_data, game->grid[i][j].animation_frame);
             }
         }
     }
+
+    // Update tracking variables
+    game->prev_sun_count = game->sun_count;
+    game->prev_selected_card = game->selected_card;
 }
 
 /**
@@ -412,7 +463,7 @@ void game_handle_touch(GameState *game, int x, int y)
     
     printf("Touch: x=%d, y=%d\n", x, y);
     
-    // 1. Check if plant card is clicked
+    // Check if plant card is clicked
     for (i = 0; i < NUM_CARDS; i++) {
         card_x = SEEDBANK_X + 10 + i * (CARD_WIDTH + CARD_SPACING);
         card_y = SEEDBANK_Y + 5;
@@ -420,14 +471,11 @@ void game_handle_touch(GameState *game, int x, int y)
         if (x >= card_x && x < card_x + CARD_WIDTH &&
             y >= card_y && y < card_y + CARD_HEIGHT) {
             
-            // Check if sun is sufficient
             if (game->sun_count >= game->cards[i].cost) {
-                // Deselect other cards
                 for (int j = 0; j < NUM_CARDS; j++) {
                     game->cards[j].selected = 0;
                 }
                 
-                // Toggle current card state
                 game->cards[i].selected = 1;
                 game->selected_card = i;
                 
@@ -439,7 +487,7 @@ void game_handle_touch(GameState *game, int x, int y)
         }
     }
     
-    // 2. Check if game grid is clicked (plant)
+    // Check if game grid is clicked (plant)
     if (game->selected_card >= 0 && 
         x >= GRID_START_X && x < GRID_START_X + GRID_COLS * GRID_WIDTH &&
         y >= GRID_START_Y && y < GRID_START_Y + GRID_ROWS * GRID_HEIGHT) {
@@ -447,17 +495,13 @@ void game_handle_touch(GameState *game, int x, int y)
         grid_col = (x - GRID_START_X) / GRID_WIDTH;
         grid_row = (y - GRID_START_Y) / GRID_HEIGHT;
         
-        // Check if grid is empty
         if (game->grid[grid_row][grid_col].plant == PLANT_NONE) {
-            // Calculate actual plant position (for debug)
             int plant_x = GRID_START_X + grid_col * GRID_WIDTH + (GRID_WIDTH - PLANT_SIZE) / 2;
             int plant_y = GRID_START_Y + grid_row * GRID_HEIGHT + (GRID_HEIGHT - PLANT_SIZE) / 2;
 
-            // Plant
             game->grid[grid_row][grid_col].plant = game->cards[game->selected_card].type;
             game->sun_count -= game->cards[game->selected_card].cost;
             
-            // Deselect
             game->cards[game->selected_card].selected = 0;
             game->selected_card = -1;
             
