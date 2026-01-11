@@ -32,6 +32,8 @@ u8 frameBuf[DISPLAY_NUM_FRAMES][DEMO_MAX_FRAME];
 // Redraw control flags
 volatile u8 global_need_full_redraw = 0;      // Set when planting or UI changes
 volatile u8 global_need_animation_redraw = 0; // Set when only animation updates
+volatile u8 global_need_sun_redraw = 0;       // Set when suns move
+volatile u8 global_need_zombie_redraw = 0;    // Set when zombies move
 
 // Game state
 GameState game;
@@ -117,6 +119,8 @@ int main(void)
         if (global_need_full_redraw) {
             global_need_full_redraw = 0;
             global_need_animation_redraw = 0; // Clear animation flag too
+            global_need_sun_redraw = 0;       // Clear sun flag too
+            global_need_zombie_redraw = 0;    // Clear zombie flag too
 
             // CRITICAL FIX: Update ALL buffers when UI changes
             // With triple buffering, if we only update one buffer, when we rotate
@@ -124,6 +128,8 @@ int main(void)
             for (i = 0; i < DISPLAY_NUM_FRAMES; i++) {
                 memcpy(DispCtrl_Inst.framePtr[i], gImage_background1_hd, DEMO_MAX_FRAME);
                 game_draw_full(&game, (u8 *)DispCtrl_Inst.framePtr[i]);
+                game_draw_suns(&game, (u8 *)DispCtrl_Inst.framePtr[i]);  // Draw suns too
+                game_draw_zombies(&game, (u8 *)DispCtrl_Inst.framePtr[i]); // Draw zombies too
                 Xil_DCacheFlushRange((unsigned int)DispCtrl_Inst.framePtr[i], DEMO_MAX_FRAME);
             }
 
@@ -132,16 +138,22 @@ int main(void)
             XAxiVdma_StartParking(&VDMA_Inst, draw_frame, XAXIVDMA_READ);
             DispCtrl_Inst.curFrame = draw_frame;
         }
-        // Check if only animation redraw is needed
-        else if (global_need_animation_redraw) {
+        // Check if only animation, sun, or zombie redraw is needed
+        else if (global_need_animation_redraw || global_need_sun_redraw || global_need_zombie_redraw) {
             global_need_animation_redraw = 0;
+            global_need_sun_redraw = 0;
+            global_need_zombie_redraw = 0;
 
             // Calculate next write frame
             u32 draw_frame = (DispCtrl_Inst.curFrame + 1) % DISPLAY_NUM_FRAMES;
 
-            // OPTIMIZED: Only redraw plant cells (no background copy, no UI redraw)
-            // This is much faster - only updates 5-10 small areas instead of full screen
+            // OPTIMIZED: Only redraw what changed
+            // - Plant cells with animation
+            // - Sun positions (with dirty rect optimization)
+            // - Zombie positions (with dirty rect optimization)
             game_draw_animation(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
+            game_draw_suns(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
+            game_draw_zombies(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
 
             // Flush cache and switch display
             Xil_DCacheFlushRange((unsigned int)DispCtrl_Inst.framePtr[draw_frame], DEMO_MAX_FRAME);
@@ -202,6 +214,7 @@ static void Timer_IRQ_Handler(void *CallBackRef)
     int current_x1, current_y1;
     static u8 touch_released = 1;
     int prev_sun, prev_card;
+    int sun_clicked = 0;
 
     XScuTimer *TimerInstancePtr = (XScuTimer *)CallBackRef;
     XScuTimer_ClearInterruptStatus(TimerInstancePtr);
@@ -210,6 +223,20 @@ static void Timer_IRQ_Handler(void *CallBackRef)
     if (game_update_animation(&game)) {
         // Animation frame changed - set flag for optimized redraw
         global_need_animation_redraw = 1;
+    }
+
+    // Update sun physics and spawning
+    game_update_suns(&game);
+    if (game.num_active_suns > 0) {
+        // Suns are active and moving - need to redraw them
+        global_need_sun_redraw = 1;
+    }
+
+    // Update zombie physics and spawning
+    game_update_zombies(&game);
+    if (game.num_active_zombies > 0) {
+        // Zombies are active and moving - need to redraw them
+        global_need_zombie_redraw = 1;
     }
 
     // Handle touch input
@@ -227,15 +254,24 @@ static void Timer_IRQ_Handler(void *CallBackRef)
             current_y1 = ((ReadBuffer[5] & 0x3f) << 8) + ReadBuffer[6];
 
             if (touch_released) {
-                // Handle game logic (card selection, planting)
-                game_handle_touch(&game, current_x1, current_y1);
+                // First check if user clicked on a sun
+                sun_clicked = game_check_sun_click(&game, current_x1, current_y1);
 
-                // Check if UI state changed AFTER handling touch
-                if (game.sun_count != prev_sun || game.selected_card != prev_card) {
-                    // UI changed - need full redraw of all buffers
+                if (sun_clicked) {
+                    // Sun was collected - update UI (sun count changed)
                     global_need_full_redraw = 1;
-                    // Full redraw takes priority, clear animation flag
                     global_need_animation_redraw = 0;
+                } else {
+                    // No sun clicked, handle normal game logic (card selection, planting)
+                    game_handle_touch(&game, current_x1, current_y1);
+
+                    // Check if UI state changed AFTER handling touch
+                    if (game.sun_count != prev_sun || game.selected_card != prev_card) {
+                        // UI changed - need full redraw of all buffers
+                        global_need_full_redraw = 1;
+                        // Full redraw takes priority, clear animation flag
+                        global_need_animation_redraw = 0;
+                    }
                 }
 
                 touch_released = 0;
