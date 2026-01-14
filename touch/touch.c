@@ -1,25 +1,53 @@
 #include "touch.h"
 #include "xparameters.h"
 #include "../i2c/PS_i2c.h"
+#include "../touch_event_queue.h"  // ä½¿ç”¨ extern å£°æ˜
 
 // Parameter definitions
 #define IIC_DEVICE_ID	XPAR_XIICPS_0_DEVICE_ID
-#define TOUCH_ADDRESS 	0x38	/* 0xA0 as an 8 bit number. */
-//u8 WriteBuffer[20];	/* Read buffer for reading a page. */
+#define TOUCH_ADDRESS 	0x38
 XIicPs *pIicInstance;
 
-//´¥ÃşÆÁÖĞ¶Ï·şÎñ×Ó³ÌĞò
+// è°ƒè¯•è®¡æ•°å™¨
+static u32 touch_isr_count = 0;
+
+//è§¦æ‘¸å±ä¸­æ–­æœåŠ¡å­ç¨‹åº
 void Touch_Intr_Handler(void *InstancePtr)
 {
-	//ÉèÖÃÈçÏÂÈ«¾Ö±äÁ¿Îª1£¬±íÃ÷ÓĞ´¥Ãş¶¯×÷¡£
-	//½øÒ»²½µÄ´¥Ãş¶¯×÷´¦Àí£¬ÔÚCPUË½ÓĞ¶¨Ê±Æ÷ÖĞ¶Ï×Ó³ÌĞòÖĞ½øĞĞ¡£
-    touch_sig = 1;
+	u8 ReadBuffer[50];
+	
+	touch_isr_count++;
+
+	// ç«‹å³è¯»å–è§¦æ‘¸æ•°æ®
+	if (touch_i2c_read_bytes(ReadBuffer, 0, 20) == XST_SUCCESS) {
+		// è§£æè§¦æ‘¸çŠ¶æ€
+		u8 state = (ReadBuffer[3] & 0xC0);
+		
+		// åªå¤„ç†æœ‰æ•ˆçš„æŒ‰ä¸‹/æ¾å¼€äº‹ä»¶
+		if (state == 0x00 || state == 0x40) {
+			// æå–åæ ‡
+			u16 x = ((ReadBuffer[3] & 0x3F) << 8) | ReadBuffer[4];
+			u16 y = ((ReadBuffer[5] & 0x3F) << 8) | ReadBuffer[6];
+			
+			// å…¥é˜Ÿäº‹ä»¶ï¼ˆè°ƒç”¨main.cä¸­å®šä¹‰çš„å‡½æ•°ï¼‰
+			u8 is_down = (state == 0x00) ? 1 : 0;
+			tq_push(x, y, is_down);
+
+			// è°ƒè¯•æ‰“å°ï¼ˆæ¯10æ¬¡æ‰“å°ä¸€æ¬¡ï¼‰
+			if (touch_isr_count % 10 == 0) {
+				printf("[ISR] Pushed %u events, state=0x%02X, x=%u, y=%u, down=%u (w=%u, r=%u)\n",
+				       touch_isr_count, state, x, y, is_down, tq_w, tq_r);
+			}
+		}
+	}
+	
+	// ä¿æŒå…¼å®¹æ€§
+	touch_sig = 1;
 }
 
-//´¥ÃşÆÁ´¥ÃşĞÅÏ¢¶ÁÈ¡º¯Êı
+//è§¦æ‘¸å±è§¦æ‘¸ä¿¡æ¯è¯»å–å‡½æ•°
 int touch_i2c_read_bytes(u8 *BufferPtr, u8 address, u16 ByteCount)
 {
-
 	u8 buf[2];
 	buf[0] = address;
 	if(i2c_wrtie_bytes(pIicInstance,TOUCH_ADDRESS,buf,1) != XST_SUCCESS)
@@ -29,17 +57,16 @@ int touch_i2c_read_bytes(u8 *BufferPtr, u8 address, u16 ByteCount)
 	return XST_SUCCESS;
 }
 
-//´¥ÃşÆÁÖĞ¶Ï³õÊ¼»¯º¯Êı
+//è§¦æ‘¸å±ä¸­æ–­åˆå§‹åŒ–å‡½æ•°
 int touch_interrupt_init (XIicPs *pIicIns,XScuGic *XScuGicInstancePtr,u32 Int_Id)
 {
 	pIicInstance=pIicIns;
-	//¹ØÁªÖĞ¶Ï·şÎñ×Ó³ÌĞò
+	//å…³è”ä¸­æ–­æœåŠ¡å­ç¨‹åº
 	XScuGic_Connect(XScuGicInstancePtr,Int_Id,(Xil_InterruptHandler)Touch_Intr_Handler,NULL);
-	//Ê¹ÄÜGICµÄIRQ_F2P(2)ÖĞ¶Ï
+	//ä½¿èƒ½GICçš„IRQ_F2P(2)ä¸­æ–­
 	XScuGic_Enable(XScuGicInstancePtr, Int_Id);
+
+	printf("[Touch] Interrupt handler registered (ISR will use extern queue)\n");
+
 	return XST_SUCCESS;
 }
-
-
-
-

@@ -43,7 +43,7 @@ void game_init(GameState *game)
 {
     int i, j;
     
-    game->sun_count = 150;
+    game->sun_count = 1500;
     game->selected_card = -1;
     game->animation_counter = 0;
     game->prev_sun_count = 150;

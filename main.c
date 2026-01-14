@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------ */
-/*       PVZ Game - Main Program (Optimized Version)           */
+/*   PVZ Game - Main Program (Touch REALLY Fixed)              */
 /* ------------------------------------------------------------ */
 #include "display_demo.h"
 #include "display_ctrl/display_ctrl.h"
@@ -13,6 +13,7 @@
 #include "touch/touch.h"
 #include "pvz_game.h"
 #include "background1_hd.h"
+#include "touch_event_queue.h"
 
 // Parameter definitions
 #define DYNCLK_BASEADDR XPAR_AXI_DYNCLK_0_BASEADDR
@@ -29,18 +30,61 @@ XScuTimer Timer_Inst;
 // Frame buffers
 u8 frameBuf[DISPLAY_NUM_FRAMES][DEMO_MAX_FRAME];
 
-// Redraw control flags
-volatile u8 global_need_full_redraw = 0;      // Set when planting or UI changes
-volatile u8 global_need_animation_redraw = 0; // Set when only animation updates
-volatile u8 global_need_sun_redraw = 0;       // Set when suns move
-volatile u8 global_need_zombie_redraw = 0;    // Set when zombies move
-volatile u8 global_need_pea_redraw = 0;       // Set when peas move
+// Global tick counter (incremented by Timer ISR)
+volatile u32 g_tick = 0;
 
 // Game state
 GameState game;
 
 // PWM duty cycle
 float PWM_duty;
+
+/* ============================================================ */
+/*         Touch Event Queue Implementation (定义在这里)        */
+/* ============================================================ */
+
+// 队列变量定义（只在 main.c 中定义一次）
+volatile TouchEvent tq[TQ_SIZE];
+volatile u8 tq_w = 0;
+volatile u8 tq_r = 0;
+
+/**
+ * Push touch event to queue
+ * Called from Touch ISR (in touch.c)
+ */
+void tq_push(u16 x, u16 y, u8 is_down)
+{
+    u8 next = (tq_w + 1) & (TQ_SIZE - 1);
+    if (next == tq_r) return;  // Queue full
+
+    tq[tq_w].x = x;
+    tq[tq_w].y = y;
+    tq[tq_w].is_down = is_down;
+
+    // Memory barrier
+    __asm__ volatile("dmb sy" ::: "memory");
+
+    tq_w = next;
+}
+
+/**
+ * Pop touch event from queue
+ * Called from main loop
+ */
+int tq_pop(TouchEvent *e)
+{
+    if (tq_r == tq_w) return 0;  // Queue empty
+
+    *e = tq[tq_r];
+
+    // Memory barrier
+    __asm__ volatile("dmb sy" ::: "memory");
+
+    tq_r = (tq_r + 1) & (TQ_SIZE - 1);
+    return 1;
+}
+
+/* ============================================================ */
 
 // Function declarations
 int PS_timer_init(XScuTimer *Timer, u16 DeviceId, u32 timer_load);
@@ -54,8 +98,9 @@ int main(void)
     int i;
 
     printf("\n========================================\n");
-    printf("  Plants vs Zombies - Optimized Version\n");
+    printf("  Plants vs Zombies - Touch REALLY Fixed\n");
     printf("  Resolution: 800x480\n");
+    printf("  Touch: Single Queue Architecture\n");
     printf("========================================\n\n");
 
     // Initialize frame buffer pointers
@@ -76,6 +121,8 @@ int main(void)
     // Touch screen interrupt initialization
     touch_interrupt_init(&I2C0_Inst, &GIC_Inst, 63);
 
+    printf("INFO: Touch queue initialized (single instance)\n");
+
     // CPU private timer initialization (10ms period, 100Hz)
     PS_timer_init(&Timer_Inst, XPAR_XSCUTIMER_0_DEVICE_ID,
                   (u32)(XPAR_CPU_CORTEXA9_0_CPU_CLK_FREQ_HZ / 200 - 1));
@@ -90,82 +137,133 @@ int main(void)
     DisplayStart(&DispCtrl_Inst);
 
     printf("Display system initialized\n");
-    printf("Double buffering: %s\n", DISPLAY_NUM_FRAMES >= 2 ? "ENABLED" : "DISABLED");
 
     // Initialize game
     game_init(&game);
 
-    // Initial full draw to all buffers (CRITICAL for triple buffering)
-    for (i = 0; i < DISPLAY_NUM_FRAMES; i++) {
-        // Copy complete background
-        memcpy(DispCtrl_Inst.framePtr[i], gImage_background1_hd, DEMO_MAX_FRAME);
+    // Get framebuffer pointer (single buffer)
+    u8 *fb = (u8 *)DispCtrl_Inst.framePtr[0];
 
-        // Draw initial game state (UI + plants)
-        game_draw_full(&game, (u8 *)DispCtrl_Inst.framePtr[i]);
-
-        // Flush cache
-        Xil_DCacheFlushRange((unsigned int)DispCtrl_Inst.framePtr[i], DEMO_MAX_FRAME);
-    }
+    // Initial full draw
+    memcpy(fb, gImage_background1_hd, DEMO_MAX_FRAME);
+    game_draw_full(&game, fb);
+    Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
 
     printf("\n========================================\n");
     printf("Game started successfully!\n");
-    printf("- Click plant card to select\n");
-    printf("- Click lawn grid to plant\n");
-    printf("OPTIMIZED: Only plants redraw on animation\n");
+    printf("Touch should work now!\n");
     printf("========================================\n\n");
+
+    // Touch state machine
+    int has_down = 0;
+    u16 down_x = 0, down_y = 0;
+
+    // Tick accumulator
+    u32 tick_accum = 0;
+
+    // Debug counters
+    u32 push_count = 0, pop_count = 0;
 
     // Main loop
     while (1) {
-        // Check if full redraw is needed (planting, UI changes)
-        if (global_need_full_redraw) {
-            global_need_full_redraw = 0;
-            global_need_animation_redraw = 0; // Clear animation flag too
-            global_need_sun_redraw = 0;       // Clear sun flag too
-            global_need_zombie_redraw = 0;    // Clear zombie flag too
-            global_need_pea_redraw = 0;       // Clear pea flag too
+        // ===== STEP 1: Atomically consume ticks =====
+        Xil_ExceptionDisable();
+        tick_accum += g_tick;
+        g_tick = 0;
+        Xil_ExceptionEnable();
 
-            // CRITICAL FIX: Update ALL buffers when UI changes
-            // With triple buffering, if we only update one buffer, when we rotate
-            // back to old buffers they will have stale UI (old sun count, wrong card selection)
-            for (i = 0; i < DISPLAY_NUM_FRAMES; i++) {
-                memcpy(DispCtrl_Inst.framePtr[i], gImage_background1_hd, DEMO_MAX_FRAME);
-                game_draw_full(&game, (u8 *)DispCtrl_Inst.framePtr[i]);
-                game_draw_suns(&game, (u8 *)DispCtrl_Inst.framePtr[i]);  // Draw suns too
-                game_draw_peas(&game, (u8 *)DispCtrl_Inst.framePtr[i]);  // Draw peas too
-                game_draw_zombies(&game, (u8 *)DispCtrl_Inst.framePtr[i]); // Draw zombies too
-                Xil_DCacheFlushRange((unsigned int)DispCtrl_Inst.framePtr[i], DEMO_MAX_FRAME);
+        // Redraw flags
+        u32 flags = 0;
+        #define F_FULL   (1u << 0)
+        #define F_ANIM   (1u << 1)
+        #define F_SUN    (1u << 2)
+        #define F_ZOMBIE (1u << 3)
+        #define F_PEA    (1u << 4)
+
+        // ===== STEP 2: Fixed-timestep update =====
+        const u32 MAX_STEPS_PER_FRAME = 3;
+        u32 steps = 0;
+
+        while (tick_accum && steps < MAX_STEPS_PER_FRAME) {
+            tick_accum--;
+            steps++;
+
+            if (game_update_animation(&game)) {
+                flags |= F_ANIM;
             }
 
-            // Switch to next frame for display
-            u32 draw_frame = (DispCtrl_Inst.curFrame + 1) % DISPLAY_NUM_FRAMES;
-            XAxiVdma_StartParking(&VDMA_Inst, draw_frame, XAXIVDMA_READ);
-            DispCtrl_Inst.curFrame = draw_frame;
+            int prev_peas = game.num_active_peas;
+            game_update_peas(&game);
+            if (game.num_active_peas || prev_peas) {
+                flags |= F_PEA;
+            }
+
+            int prev_suns = game.num_active_suns;
+            game_update_suns(&game);
+            if (game.num_active_suns || prev_suns) {
+                flags |= F_SUN;
+            }
+
+            int prev_zombies = game.num_active_zombies;
+            game_update_zombies(&game);
+            if (game.num_active_zombies || prev_zombies) {
+                flags |= F_ZOMBIE;
+            }
         }
-        // Check if only animation, sun, zombie, or pea redraw is needed
-        else if (global_need_animation_redraw || global_need_sun_redraw ||
-                 global_need_zombie_redraw || global_need_pea_redraw) {
-            global_need_animation_redraw = 0;
-            global_need_sun_redraw = 0;
-            global_need_zombie_redraw = 0;
-            global_need_pea_redraw = 0;
 
-            // Calculate next write frame
-            u32 draw_frame = (DispCtrl_Inst.curFrame + 1) % DISPLAY_NUM_FRAMES;
+        // ===== STEP 3: Process touch events =====
+        TouchEvent ev;
+        while (tq_pop(&ev)) {
+            pop_count++;
 
-            // OPTIMIZED: Only redraw what changed
-            // - Plant cells with animation
-            // - Sun positions (with dirty rect optimization)
-            // - Pea positions (with dirty rect optimization)
-            // - Zombie positions (with dirty rect optimization)
-            game_draw_animation(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
-            game_draw_suns(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
-            game_draw_peas(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
-            game_draw_zombies(&game, (u8 *)DispCtrl_Inst.framePtr[draw_frame]);
+            // Debug: print every 10 events
+            if (pop_count % 10 == 0) {
+                printf("[Main] Popped %u events (w=%u, r=%u)\n",
+                       pop_count, tq_w, tq_r);
+            }
 
-            // Flush cache and switch display
-            Xil_DCacheFlushRange((unsigned int)DispCtrl_Inst.framePtr[draw_frame], DEMO_MAX_FRAME);
-            XAxiVdma_StartParking(&VDMA_Inst, draw_frame, XAXIVDMA_READ);
-            DispCtrl_Inst.curFrame = draw_frame;
+            if (ev.is_down) {
+                has_down = 1;
+                down_x = ev.x;
+                down_y = ev.y;
+            }
+            else {
+                if (has_down) {
+                    int prev_sun = game.sun_count;
+                    int prev_card = game.selected_card;
+
+                    int sun_clicked = game_check_sun_click(&game, down_x, down_y);
+
+                    if (sun_clicked) {
+                        flags |= F_FULL;
+                    }
+                    else {
+                        game_handle_touch(&game, down_x, down_y);
+
+                        if (game.sun_count != prev_sun || game.selected_card != prev_card) {
+                            flags |= F_FULL;
+                        }
+                    }
+                }
+                has_down = 0;
+            }
+        }
+
+        // ===== STEP 4: Render =====
+        if (flags & F_FULL) {
+            memcpy(fb, gImage_background1_hd, DEMO_MAX_FRAME);
+            game_draw_full(&game, fb);
+            game_draw_suns(&game, fb);
+            game_draw_peas(&game, fb);
+            game_draw_zombies(&game, fb);
+            Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+        }
+        else if (flags) {
+            if (flags & F_ANIM)   game_draw_animation(&game, fb);
+            if (flags & F_SUN)    game_draw_suns(&game, fb);
+            if (flags & F_PEA)    game_draw_peas(&game, fb);
+            if (flags & F_ZOMBIE) game_draw_zombies(&game, fb);
+            Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
         }
     }
 
@@ -212,88 +310,11 @@ int PS_timer_init(XScuTimer *Timer, u16 DeviceId, u32 timer_load)
 }
 
 /**
- * Optimized timer interrupt handler
- * Updates game logic and sets appropriate redraw flags
+ * Timer interrupt handler
  */
 static void Timer_IRQ_Handler(void *CallBackRef)
 {
-    u8 ReadBuffer[50];
-    int current_x1, current_y1;
-    static u8 touch_released = 1;
-    int prev_sun, prev_card;
-    int sun_clicked = 0;
-
     XScuTimer *TimerInstancePtr = (XScuTimer *)CallBackRef;
     XScuTimer_ClearInterruptStatus(TimerInstancePtr);
-
-    // Update animation logic first
-    if (game_update_animation(&game)) {
-        // Animation frame changed - set flag for optimized redraw
-        global_need_animation_redraw = 1;
-    }
-
-    // Update sun physics and spawning
-    game_update_suns(&game);
-    if (game.num_active_suns > 0) {
-        // Suns are active and moving - need to redraw them
-        global_need_sun_redraw = 1;
-    }
-
-    // Update zombie physics and spawning
-    game_update_zombies(&game);
-    if (game.num_active_zombies > 0) {
-        // Zombies are active and moving - need to redraw them
-        global_need_zombie_redraw = 1;
-    }
-
-    // Update pea physics and collision detection
-    game_update_peas(&game);
-    if (game.num_active_peas > 0) {
-        // Peas are active and moving - need to redraw them
-        global_need_pea_redraw = 1;
-    }
-
-    // Handle touch input
-    if (touch_sig == 1) {
-        // Store UI state BEFORE handling touch
-        prev_sun = game.sun_count;
-        prev_card = game.selected_card;
-
-        touch_i2c_read_bytes(ReadBuffer, 0, 20);
-        touch_sig = 0;
-
-        if ((ReadBuffer[3] & 0xc0) == 0x00) {
-            // Touch pressed
-            current_x1 = ((ReadBuffer[3] & 0x3f) << 8) + ReadBuffer[4];
-            current_y1 = ((ReadBuffer[5] & 0x3f) << 8) + ReadBuffer[6];
-
-            if (touch_released) {
-                // First check if user clicked on a sun
-                sun_clicked = game_check_sun_click(&game, current_x1, current_y1);
-
-                if (sun_clicked) {
-                    // Sun was collected - update UI (sun count changed)
-                    global_need_full_redraw = 1;
-                    global_need_animation_redraw = 0;
-                } else {
-                    // No sun clicked, handle normal game logic (card selection, planting)
-                    game_handle_touch(&game, current_x1, current_y1);
-
-                    // Check if UI state changed AFTER handling touch
-                    if (game.sun_count != prev_sun || game.selected_card != prev_card) {
-                        // UI changed - need full redraw of all buffers
-                        global_need_full_redraw = 1;
-                        // Full redraw takes priority, clear animation flag
-                        global_need_animation_redraw = 0;
-                    }
-                }
-
-                touch_released = 0;
-            }
-        }
-        else if ((ReadBuffer[3] & 0xc0) == 0x40) {
-            // Touch released
-            touch_released = 1;
-        }
-    }
+    g_tick++;
 }
