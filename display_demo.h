@@ -10,6 +10,6 @@
 #define DEMO_MAX_FRAME          (800 * 480 * 3)    // = 2,764,800 ×Ö½Ú
 #define DEMO_STRIDE             (800 * 3)           // = 3,840 ×Ö½Ú
 
-#define DISPLAY_NUM_FRAMES      1
+#define DISPLAY_NUM_FRAMES      2
 
 #endif

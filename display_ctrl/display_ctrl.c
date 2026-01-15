@@ -377,7 +377,7 @@ int DisplayInitialize(DisplayCtrl *dispPtr, XAxiVdma *vdma, u16 vtcId, u32 dynCl
 	 */
 	dispPtr->vdmaConfig.FrameDelay = 0;
 	dispPtr->vdmaConfig.EnableCircularBuf = 1;
-	dispPtr->vdmaConfig.EnableSync = 0;
+	dispPtr->vdmaConfig.EnableSync = 1;
 	dispPtr->vdmaConfig.PointNum = 0;
 	dispPtr->vdmaConfig.EnableFrameCounter = 0;
 
