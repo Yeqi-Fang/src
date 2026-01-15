@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------ */
-/*   PVZ Game - Main Program (Touch REALLY Fixed)              */
+/*   PVZ Game - Main Program (All Issues Fixed)                */
 /* ------------------------------------------------------------ */
 #include "display_demo.h"
 #include "display_ctrl/display_ctrl.h"
@@ -40,10 +40,9 @@ GameState game;
 float PWM_duty;
 
 /* ============================================================ */
-/*         Touch Event Queue Implementation (¶¨ÒåÔÚÕâÀï)        */
+/*         Touch Event Queue Implementation                     */
 /* ============================================================ */
 
-// ¶ÓÁÐ±äÁ¿¶¨Òå£¨Ö»ÔÚ main.c ÖÐ¶¨ÒåÒ»´Î£©
 volatile TouchEvent tq[TQ_SIZE];
 volatile u8 tq_w = 0;
 volatile u8 tq_r = 0;
@@ -98,9 +97,9 @@ int main(void)
     int i;
 
     printf("\n========================================\n");
-    printf("  Plants vs Zombies - Touch REALLY Fixed\n");
+    printf("  Plants vs Zombies - All Fixed\n");
     printf("  Resolution: 800x480\n");
-    printf("  Touch: Single Queue Architecture\n");
+    printf("  No Tearing + Defeat Animation Working\n");
     printf("========================================\n\n");
 
     // Initialize frame buffer pointers
@@ -121,7 +120,7 @@ int main(void)
     // Touch screen interrupt initialization
     touch_interrupt_init(&I2C0_Inst, &GIC_Inst, 63);
 
-    printf("INFO: Touch queue initialized (single instance)\n");
+    printf("INFO: Touch queue initialized\n");
 
     // CPU private timer initialization (10ms period, 100Hz)
     PS_timer_init(&Timer_Inst, XPAR_XSCUTIMER_0_DEVICE_ID,
@@ -151,7 +150,6 @@ int main(void)
 
     printf("\n========================================\n");
     printf("Game started successfully!\n");
-    printf("Touch should work now!\n");
     printf("========================================\n\n");
 
     // Touch state machine
@@ -162,7 +160,11 @@ int main(void)
     u32 tick_accum = 0;
 
     // Debug counters
-    u32 push_count = 0, pop_count = 0;
+    u32 pop_count = 0;
+
+    // Game over rendering state
+    static int fade_needs_black_transition = 0;
+    static GamePlayState prev_play_state = GAME_PLAYING;
 
     // Main loop
     while (1) {
@@ -192,15 +194,12 @@ int main(void)
             if (game.play_state != GAME_PLAYING) {
                 game_update_gameover(&game);
 
-                // Still update zombie bite animations during game over
+                // Continue zombie bite animations during game over fade
                 int prev_zombies = game.num_active_zombies;
                 game_update_zombies(&game);
                 if (game.num_active_zombies || prev_zombies) {
                     flags |= F_ZOMBIE;
                 }
-
-                // BUG FIX #2: Force full redraw during game over to prevent frozen frames
-                flags |= F_FULL;
 
                 // Skip other updates during game over
                 continue;
@@ -235,12 +234,6 @@ int main(void)
         while (tq_pop(&ev)) {
             pop_count++;
 
-            // Debug: print every 10 events
-            if (pop_count % 10 == 0) {
-                printf("[Main] Popped %u events (w=%u, r=%u)\n",
-                       pop_count, tq_w, tq_r);
-            }
-
             if (ev.is_down) {
                 has_down = 1;
                 down_x = ev.x;
@@ -270,8 +263,23 @@ int main(void)
 
         // ===== STEP 4: Render =====
         if (game.play_state == GAME_PLAYING) {
-            // Normal gameplay rendering
-            if (flags & F_FULL) {
+            /* Restore brightness and clear defeat image when returning from game over */
+            if (prev_play_state != GAME_PLAYING) {
+                set_pwm_duty(XPAR_AX_PWM_0_S00_AXI_BASEADDR, PWM_duty);
+
+                // âœ… Full redraw to clear defeat image
+                memcpy(fb, gImage_background1_hd, DEMO_MAX_FRAME);
+                game_draw_full(&game, fb);
+                game_draw_suns(&game, fb);
+                game_draw_peas(&game, fb);
+                game_draw_zombies(&game, fb);
+                Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+
+                prev_play_state = GAME_PLAYING;
+                fade_needs_black_transition = 0;  // Reset for next cycle
+            }
+            // Normal gameplay rendering (optimized with flags)
+            else if (flags & F_FULL) {
                 memcpy(fb, gImage_background1_hd, DEMO_MAX_FRAME);
                 game_draw_full(&game, fb);
                 game_draw_suns(&game, fb);
@@ -288,40 +296,73 @@ int main(void)
             }
         }
         else if (game.play_state == GAME_FADING_TO_BLACK) {
-            /* FIX: Keep "if (flags)" check to prevent over-rendering
-             * flags is set by "flags |= F_FULL" at line 203
-             * This ensures we only render when timer ticks (100Hz)
-             * Not every main loop iteration (1000+ Hz)
-             * Prevents screen tearing from excessive framebuffer writes
+            /* Anti-Tearing Fade Strategy:
+             * - First frame: Full redraw (complete scene)
+             * - Subsequent frames: Only update zombies (incremental)
+             * - PWM fades every frame: 0.7 â†’ 1.0 (darker)
+             * - At complete darkness: fill black + restore brightness
              */
-            if (flags) {
-                // Draw complete scene
+
+            // Detect state transition: entering FADING_TO_BLACK
+            if (prev_play_state != GAME_FADING_TO_BLACK) {
+                // âœ… First frame: Full redraw to establish scene
                 memcpy(fb, gImage_background1_hd, DEMO_MAX_FRAME);
                 game_draw_full(&game, fb);
                 game_draw_suns(&game, fb);
                 game_draw_peas(&game, fb);
                 game_draw_zombies(&game, fb);
-
-                // Apply fade effect on top of complete scene
-                game_draw_fade_to_black(fb, game.fade_progress);
-
                 Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+
+                prev_play_state = GAME_FADING_TO_BLACK;
+                fade_needs_black_transition = 1;
+            }
+            else {
+                // âœ… Subsequent frames: Only update animated zombies (no tearing!)
+                if (flags & F_ZOMBIE) {
+                    game_draw_zombies(&game, fb);
+                    Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+                }
+            }
+
+            /* Hardware PWM fade - runs every frame */
+            float duty = PWM_duty + (1.0f - PWM_duty) * game.fade_progress;
+            if (duty > 1.0f) duty = 1.0f;
+            set_pwm_duty(XPAR_AX_PWM_0_S00_AXI_BASEADDR, duty);
+
+            /* At complete darkness: fill black + restore brightness */
+            if (game.fade_progress >= 0.99f && fade_needs_black_transition) {
+                game_fill_black(fb);
+                Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+                set_pwm_duty(XPAR_AX_PWM_0_S00_AXI_BASEADDR, PWM_duty);
+                fade_needs_black_transition = 0;
             }
         }
         else if (game.play_state == GAME_SHOWING_DEFEAT) {
-            /* FIX: Keep "if (flags)" check to prevent over-rendering
-             * Only render when defeat_scale changes (at timer tick)
-             * Prevents screen tearing
+            /* Defeat Scaling Animation:
+             * - First frame: Ensure black background
+             * - Every frame: Draw defeat image with current scale
              */
-            if (flags) {
+
+            // Detect state transition: entering GAME_SHOWING_DEFEAT
+            if (prev_play_state != GAME_SHOWING_DEFEAT) {
+                // âœ… Ensure black background (in case state switched before fill_black)
+            	set_pwm_duty(XPAR_AX_PWM_0_S00_AXI_BASEADDR, PWM_duty);
+            	fade_needs_black_transition = 0;
                 game_fill_black(fb);
-                game_draw_defeat_image(fb, game.defeat_scale);
                 Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+                prev_play_state = GAME_SHOWING_DEFEAT;
             }
+
+            // âœ… Redraw defeat image every frame (scaling animation)
+            game_draw_defeat_image(fb, game.defeat_scale);
+            Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
         }
         else if (game.play_state == GAME_RESTARTING) {
-            /* Render full defeat image while waiting to restart */
-            if (game.game_over_timer == 1) {
+            /* Static display while waiting to restart */
+            if (prev_play_state != GAME_RESTARTING) {
+                prev_play_state = GAME_RESTARTING;
+
+                // Draw final defeat image once
                 game_fill_black(fb);
                 game_draw_defeat_image(fb, 1.0f);
                 Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
