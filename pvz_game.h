@@ -32,16 +32,16 @@
 #define SPRITE_ROWS          5
 
 /* Sun parameters */
-#define SUN_SIZE             40     // Sun sprite is 30x30
-#define MAX_SUNS             20     // Maximum active suns
-#define SUN_SPAWN_INTERVAL   2500   // 25 seconds at 100Hz = 2500 ticks
-#define SUN_LIFETIME         800    // 8 seconds before disappearing
-#define SUN_VALUE            25     // Sun gives 25 points
-#define SUN_GRAVITY          0.12f  // Gravity acceleration
-#define SUN_INITIAL_VY       -2.5f  // Initial upward velocity
-#define SUN_INITIAL_VX       1.2f   // Initial rightward velocity
-#define SUN_LANDING_HEIGHT   380    // Y position where sun lands and stops
-#define SUN_ERASE_MARGIN     20      // Extra pixels to erase (prevents artifacts)
+#define SUN_SIZE             40
+#define MAX_SUNS             20
+#define SUN_SPAWN_INTERVAL   2500
+#define SUN_LIFETIME         800
+#define SUN_VALUE            25
+#define SUN_GRAVITY          0.12f
+#define SUN_INITIAL_VY       -2.5f
+#define SUN_INITIAL_VX       1.2f
+#define SUN_LANDING_HEIGHT   380
+#define SUN_ERASE_MARGIN     20
 
 /* UI position parameters */
 #define SEEDBANK_X     220
@@ -97,67 +97,105 @@ typedef struct {
 typedef struct {
     PlantType plant;
     int animation_frame;
-    int sun_spawn_counter;    // Counter for sun production (only for sunflowers)
-    int shoot_counter;        // Counter for pea shooting (only for peashooters)
+    int sun_spawn_counter;
+    int shoot_counter;
 } GridCell;
 
 /* Sun object for collection */
 typedef struct {
-    float x, y;           // Current position (float for smooth physics)
-    float vx, vy;         // Velocity
-    int prev_x, prev_y;   // Previous integer position (for dirty rect tracking)
-    u8 active;            // Is this sun active?
-    u8 landed;            // Has sun landed and stopped?
-    u16 lifetime;         // Remaining lifetime in ticks
+    float x, y;
+    float vx, vy;
+    int prev_x, prev_y;
+    u8 active;
+    u8 landed;
+    u16 lifetime;
 } Sun;
 
 /* Zombie parameters */
-#define ZOMBIE_WIDTH         80     // Width of zombie sprite
-#define ZOMBIE_HEIGHT        139    // Height of zombie sprite
-#define ZOMBIE_SHEET_WIDTH   640    // Sprite sheet width
-#define ZOMBIE_SHEET_HEIGHT  834    // Sprite sheet height
-#define ZOMBIE_ROWS          6      // Rows in sprite sheet
-#define ZOMBIE_COLS          8      // Columns in sprite sheet
-#define MAX_ZOMBIES          10     // Maximum active zombies
-#define ZOMBIE_SPEED         0.3f   // Zombie movement speed (pixels per tick)
-#define ZOMBIE_SPAWN_X       800    // Spawn position X (right edge)
-#define ZOMBIE_ANIMATION_FPS 8      // Animation speed
+#define ZOMBIE_WIDTH         80
+#define ZOMBIE_HEIGHT        139
+#define ZOMBIE_SHEET_WIDTH   640
+#define ZOMBIE_SHEET_HEIGHT  834
+#define ZOMBIE_ROWS          6
+#define ZOMBIE_COLS          8
+#define MAX_ZOMBIES          10
+#define ZOMBIE_SPEED         0.2f
+#define ZOMBIE_SPAWN_X       800
+#define ZOMBIE_ANIMATION_FPS 8
 #define ZOMBIE_FRAMES_PER_UPDATE  (TIMER_FREQ_HZ / ZOMBIE_ANIMATION_FPS)
-#define ZOMBIE_SPAWN_INTERVAL 1000  // 10 seconds at 100Hz = 1000 ticks
-#define ZOMBIE_ERASE_MARGIN  5      // Extra pixels to erase (prevents artifacts)
+#define ZOMBIE_SPAWN_INTERVAL 1000
+#define ZOMBIE_ERASE_MARGIN  5
 
 /* Zombie rendering adjustments */
-#define ZOMBIE_Y_OFFSET      -15     // Move zombie down by pixels (adjust visual position)
-#define ZOMBIE_SCALE         0.85f  // Scale factor (0.85 = 85% of original size)
-#define ZOMBIE_DISPLAY_WIDTH  ((int)(ZOMBIE_WIDTH * ZOMBIE_SCALE))   // Scaled width: 68
-#define ZOMBIE_DISPLAY_HEIGHT ((int)(ZOMBIE_HEIGHT * ZOMBIE_SCALE))  // Scaled height: 118
+#define ZOMBIE_Y_OFFSET      -15
+#define ZOMBIE_SCALE         0.8f
+#define ZOMBIE_DISPLAY_WIDTH  ((int)(ZOMBIE_WIDTH * ZOMBIE_SCALE))
+#define ZOMBIE_DISPLAY_HEIGHT ((int)(ZOMBIE_HEIGHT * ZOMBIE_SCALE))
+
+/* Bite animation parameters */
+#define BITE_FRAME_WIDTH     80
+#define BITE_FRAME_HEIGHT    139
+#define BITE_SHEET_WIDTH     640
+#define BITE_SHEET_HEIGHT    695
+#define BITE_ROWS            5
+#define BITE_COLS            8
+#define BITE_ANIMATION_FRAMES 40
+#define BITE_ANIMATION_FPS   12
+#define BITE_FRAMES_PER_UPDATE (TIMER_FREQ_HZ / BITE_ANIMATION_FPS)
+#define BITE_DURATION        300
+
+/* Zombie state */
+typedef enum {
+    ZOMBIE_WALKING = 0,
+    ZOMBIE_BITING = 1
+} ZombieState;
 
 /* Zombie object */
 typedef struct {
-    float x, y;           // Current position (float for smooth movement)
-    int prev_x, prev_y;   // Previous integer position (for dirty rect tracking)
-    int row;              // Which lawn row the zombie is in (0-4)
-    int animation_frame;  // Current animation frame (0-47, 6x8=48 frames)
-    u8 active;            // Is this zombie active?
-    int health;           // Zombie health (10 = full health, 0 = dead)
+    float x, y;
+    int prev_x, prev_y;
+    int row;
+    int animation_frame;
+    u8 active;
+    int health;
+    ZombieState state;
+    int target_col;
+    int bite_timer;
+    int bite_anim_frame;
 } Zombie;
 
 /* Pea projectile parameters */
-#define PEA_SIZE             24     // Pea sprite is 28x28
-#define MAX_PEAS             50     // Maximum active peas
-#define PEA_SPEED            3.0f   // Pea movement speed (pixels per tick)
-#define PEA_DAMAGE           1      // Damage per pea hit
-#define PEA_SHOOT_INTERVAL   145    // 1.45 seconds at 100Hz = 145 ticks
-#define PEA_ERASE_MARGIN     12     // Extra pixels to erase (prevents artifacts) - increased from 5 to 12
-#define ZOMBIE_MAX_HEALTH    10     // Zombie needs 10 peas to die
+#define PEA_SIZE             24
+#define MAX_PEAS             50
+#define PEA_SPEED            3.0f
+#define PEA_DAMAGE           1
+#define PEA_SHOOT_INTERVAL   145
+#define PEA_ERASE_MARGIN     12
+#define ZOMBIE_MAX_HEALTH    10
 
 /* Pea projectile object */
 typedef struct {
-    float x, y;           // Current position (float for smooth movement)
-    int prev_x, prev_y;   // Previous integer position (for dirty rect tracking)
-    int row;              // Which lawn row the pea is in (0-4)
-    u8 active;            // Is this pea active?
+    float x, y;
+    int prev_x, prev_y;
+    int row;
+    u8 active;
 } Pea;
+
+/* Game play state enum */
+typedef enum {
+    GAME_PLAYING = 0,
+    GAME_FADING_TO_BLACK = 1,
+    GAME_SHOWING_DEFEAT = 2,
+    GAME_RESTARTING = 3
+} GamePlayState;
+
+/* Game over animation parameters */
+#define FADE_TO_BLACK_DURATION  200
+#define DEFEAT_SCALE_DURATION   150
+#define DEFEAT_IMAGE_WIDTH      800
+#define DEFEAT_IMAGE_HEIGHT     480
+#define DEFEAT_MIN_SCALE        0.02f
+#define DEFEAT_MAX_SCALE        1.0f
 
 /* Game state */
 typedef struct {
@@ -176,6 +214,13 @@ typedef struct {
     int zombie_animation_counter;
     Pea peas[MAX_PEAS];
     int num_active_peas;
+    int bite_animation_counter;
+
+    /* Game over state */
+    GamePlayState play_state;
+    int game_over_timer;
+    float fade_progress;
+    float defeat_scale;
 } GameState;
 
 /* Function declarations */
@@ -214,11 +259,21 @@ void game_spawn_zombie(GameState *game);
 void game_update_zombies(GameState *game);
 void game_draw_zombies(GameState *game, u8 *framebuf);
 void draw_zombie_sprite(u8 *framebuf, int dst_x, int dst_y, const u8 *sheet_data, int frame_index);
+void draw_bite_sprite(u8 *framebuf, int dst_x, int dst_y, const u8 *sheet_data, int frame_index);
 
 /* Pea functions */
 void game_shoot_pea(GameState *game, int row, int col);
 void game_update_peas(GameState *game);
 void game_draw_peas(GameState *game, u8 *framebuf);
 void game_check_pea_zombie_collision(GameState *game);
+
+/* Game over functions */
+int game_check_defeat(GameState *game);
+void game_trigger_defeat(GameState *game);
+void game_update_gameover(GameState *game);
+void game_draw_fade_to_black(u8 *framebuf, float progress);
+void game_fill_black(u8 *framebuf);  /* BUG FIX: Added missing function declaration */
+void game_draw_defeat_image(u8 *framebuf, float scale);
+void game_reset(GameState *game);
 
 #endif // PVZ_GAME_H

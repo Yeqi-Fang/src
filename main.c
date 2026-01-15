@@ -188,6 +188,25 @@ int main(void)
             tick_accum--;
             steps++;
 
+            // Update game over animation if game is over
+            if (game.play_state != GAME_PLAYING) {
+                game_update_gameover(&game);
+
+                // Still update zombie bite animations during game over
+                int prev_zombies = game.num_active_zombies;
+                game_update_zombies(&game);
+                if (game.num_active_zombies || prev_zombies) {
+                    flags |= F_ZOMBIE;
+                }
+
+                // BUG FIX #2: Force full redraw during game over to prevent frozen frames
+                flags |= F_FULL;
+
+                // Skip other updates during game over
+                continue;
+            }
+
+            // Normal game updates (only during GAME_PLAYING)
             if (game_update_animation(&game)) {
                 flags |= F_ANIM;
             }
@@ -250,21 +269,65 @@ int main(void)
         }
 
         // ===== STEP 4: Render =====
-        if (flags & F_FULL) {
-            memcpy(fb, gImage_background1_hd, DEMO_MAX_FRAME);
-            game_draw_full(&game, fb);
-            game_draw_suns(&game, fb);
-            game_draw_peas(&game, fb);
-            game_draw_zombies(&game, fb);
-            Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+        if (game.play_state == GAME_PLAYING) {
+            // Normal gameplay rendering
+            if (flags & F_FULL) {
+                memcpy(fb, gImage_background1_hd, DEMO_MAX_FRAME);
+                game_draw_full(&game, fb);
+                game_draw_suns(&game, fb);
+                game_draw_peas(&game, fb);
+                game_draw_zombies(&game, fb);
+                Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+            }
+            else if (flags) {
+                if (flags & F_ANIM)   game_draw_animation(&game, fb);
+                if (flags & F_SUN)    game_draw_suns(&game, fb);
+                if (flags & F_PEA)    game_draw_peas(&game, fb);
+                if (flags & F_ZOMBIE) game_draw_zombies(&game, fb);
+                Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+            }
         }
-        else if (flags) {
-            if (flags & F_ANIM)   game_draw_animation(&game, fb);
-            if (flags & F_SUN)    game_draw_suns(&game, fb);
-            if (flags & F_PEA)    game_draw_peas(&game, fb);
-            if (flags & F_ZOMBIE) game_draw_zombies(&game, fb);
-            Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+        else if (game.play_state == GAME_FADING_TO_BLACK) {
+            /* FIX: Keep "if (flags)" check to prevent over-rendering
+             * flags is set by "flags |= F_FULL" at line 203
+             * This ensures we only render when timer ticks (100Hz)
+             * Not every main loop iteration (1000+ Hz)
+             * Prevents screen tearing from excessive framebuffer writes
+             */
+            if (flags) {
+                // Draw complete scene
+                memcpy(fb, gImage_background1_hd, DEMO_MAX_FRAME);
+                game_draw_full(&game, fb);
+                game_draw_suns(&game, fb);
+                game_draw_peas(&game, fb);
+                game_draw_zombies(&game, fb);
+
+                // Apply fade effect on top of complete scene
+                game_draw_fade_to_black(fb, game.fade_progress);
+
+                Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+            }
         }
+        else if (game.play_state == GAME_SHOWING_DEFEAT) {
+            /* FIX: Keep "if (flags)" check to prevent over-rendering
+             * Only render when defeat_scale changes (at timer tick)
+             * Prevents screen tearing
+             */
+            if (flags) {
+                game_fill_black(fb);
+                game_draw_defeat_image(fb, game.defeat_scale);
+                Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+            }
+        }
+        else if (game.play_state == GAME_RESTARTING) {
+            /* Render full defeat image while waiting to restart */
+            if (game.game_over_timer == 1) {
+                game_fill_black(fb);
+                game_draw_defeat_image(fb, 1.0f);
+                Xil_DCacheFlushRange((unsigned int)fb, DEMO_MAX_FRAME);
+            }
+        }
+
     }
 
     return 0;

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include "ZombiesWon_ani.h"
 
 // Include image header files
 extern const unsigned char gImage_background1_hd[];
@@ -17,6 +18,7 @@ extern const unsigned char gImage_background1_hd[];
 #include "PeaShooter_ani.h"
 #include "SunFlower_ani.h"
 #include "walk_ani.h"
+#include "bite_ani.h"
 #include "ProjectilePea.h"
 
 // Forward declarations
@@ -79,11 +81,16 @@ void game_init(GameState *game)
     game->num_active_zombies = 0;
     game->zombie_spawn_counter = 0;
     game->zombie_animation_counter = 0;
+    game->bite_animation_counter = 0;
     for (i = 0; i < MAX_ZOMBIES; i++) {
         game->zombies[i].active = 0;
         game->zombies[i].prev_x = -1;
         game->zombies[i].prev_y = -1;
         game->zombies[i].health = 0;  // Will be set to ZOMBIE_MAX_HEALTH when spawned
+        game->zombies[i].state = ZOMBIE_WALKING;
+        game->zombies[i].target_col = -1;
+        game->zombies[i].bite_timer = 0;
+        game->zombies[i].bite_anim_frame = 0;
     }
 
     // Initialize peas
@@ -95,6 +102,13 @@ void game_init(GameState *game)
     }
 
     printf("Game initialized: sun=%d\n", game->sun_count);
+
+    // ADD THESE LINES HERE:
+    // Initialize game over state
+    game->play_state = GAME_PLAYING;
+    game->game_over_timer = 0;
+    game->fade_progress = 0.0f;
+    game->defeat_scale = DEFEAT_MIN_SCALE;
 }
 
 /**
@@ -984,6 +998,12 @@ void game_spawn_zombie(GameState *game)
             // Initialize health
             game->zombies[i].health = ZOMBIE_MAX_HEALTH;
 
+            // Initialize biting state
+            game->zombies[i].state = ZOMBIE_WALKING;
+            game->zombies[i].target_col = -1;
+            game->zombies[i].bite_timer = 0;
+            game->zombies[i].bite_anim_frame = 0;
+
             game->num_active_zombies++;
 
             printf("Zombie spawned at row %d with %d health\n", game->zombies[i].row, game->zombies[i].health);
@@ -996,9 +1016,38 @@ void game_spawn_zombie(GameState *game)
  * Update zombie positions and animation
  * Returns 1 if any zombie moved, 0 otherwise
  */
+/**
+ * Update zombie positions, animation, and handle biting
+ */
 void game_update_zombies(GameState *game)
 {
-    int i;
+    int i, col, row;
+
+    // Check for game over condition (zombie breached left boundary)
+    if (game_check_defeat(game)) {
+        game_trigger_defeat(game);
+    }
+
+    // Don't update zombies normally if game is over
+    if (game->play_state != GAME_PLAYING) {
+        // But still update bite animation during game over
+        game->bite_animation_counter++;
+        if (game->bite_animation_counter >= BITE_FRAMES_PER_UPDATE) {
+            game->bite_animation_counter = 0;
+
+            // Update bite animations for zombies at the boundary
+            for (i = 0; i < MAX_ZOMBIES; i++) {
+                if (game->zombies[i].active && game->zombies[i].state == ZOMBIE_BITING) {
+                    game->zombies[i].bite_anim_frame++;
+                    if (game->zombies[i].bite_anim_frame >= BITE_ANIMATION_FRAMES) {
+                        game->zombies[i].bite_anim_frame = 0;
+                    }
+                }
+            }
+        }
+        return; // Exit function, don't do normal zombie updates
+    }
+
 
     // Update spawn counter
     game->zombie_spawn_counter++;
@@ -1007,33 +1056,150 @@ void game_update_zombies(GameState *game)
         game_spawn_zombie(game);
     }
 
-    // Update animation counter
+    // Update walking animation counter
     game->zombie_animation_counter++;
+    int update_walk_anim = 0;
     if (game->zombie_animation_counter >= ZOMBIE_FRAMES_PER_UPDATE) {
         game->zombie_animation_counter = 0;
+        update_walk_anim = 1;
+    }
 
-        // Update animation frame for all active zombies
-        for (i = 0; i < MAX_ZOMBIES; i++) {
-            if (game->zombies[i].active) {
+    // Update bite animation counter
+    game->bite_animation_counter++;
+    int update_bite_anim = 0;
+    if (game->bite_animation_counter >= BITE_FRAMES_PER_UPDATE) {
+        game->bite_animation_counter = 0;
+        update_bite_anim = 1;
+    }
+
+    // Process each zombie
+    for (i = 0; i < MAX_ZOMBIES; i++) {
+        if (!game->zombies[i].active) continue;
+
+        if (game->zombies[i].state == ZOMBIE_WALKING) {
+            // === WALKING STATE ===
+
+            // Move left
+            game->zombies[i].x -= ZOMBIE_SPEED;
+
+            // Update walking animation
+            if (update_walk_anim) {
                 game->zombies[i].animation_frame++;
                 if (game->zombies[i].animation_frame >= ZOMBIE_ROWS * ZOMBIE_COLS) {
                     game->zombies[i].animation_frame = 0;
                 }
             }
-        }
-    }
 
-    // Update positions
-    for (i = 0; i < MAX_ZOMBIES; i++) {
-        if (game->zombies[i].active) {
-            // Move left
-            game->zombies[i].x -= ZOMBIE_SPEED;
-
-            // Check if zombie went off screen (use display width)
+            // Check if zombie went off screen
             if (game->zombies[i].x + ZOMBIE_DISPLAY_WIDTH < 0) {
                 game->zombies[i].active = 0;
                 game->num_active_zombies--;
                 printf("Zombie left screen\n");
+                continue;
+            }
+
+            // Check for plant collision
+            // Calculate zombie center X position
+            int zombie_center_x = (int)game->zombies[i].x + (ZOMBIE_DISPLAY_WIDTH / 2);
+            int zombie_row = game->zombies[i].row;
+
+            // Check each column for plants
+            for (col = 0; col < GRID_COLS; col++) {
+                if (game->grid[zombie_row][col].plant != PLANT_NONE) {
+                    // Calculate plant position
+                    int plant_x = GRID_START_X + col * GRID_WIDTH;
+                    int plant_right = plant_x + PLANT_SIZE;
+
+                    // Check if zombie center is touching plant's right side
+                    // (approaching from the right, zombie center passes plant edge)
+                    if (zombie_center_x <= plant_right &&
+                        zombie_center_x >= plant_x) {
+                        // Collision! Start biting
+                        game->zombies[i].state = ZOMBIE_BITING;
+                        game->zombies[i].target_col = col;
+                        game->zombies[i].bite_timer = BITE_DURATION;
+                        game->zombies[i].bite_anim_frame = 0;
+
+                        printf("Zombie %d started biting plant at row %d, col %d\n",
+                               i, zombie_row, col);
+                        break;  // Stop checking columns
+                    }
+                }
+            }
+        }
+        else if (game->zombies[i].state == ZOMBIE_BITING) {
+            // === BITING STATE ===
+
+            // Zombie does NOT move while biting
+
+            // Update bite animation
+            if (update_bite_anim) {
+                game->zombies[i].bite_anim_frame++;
+                if (game->zombies[i].bite_anim_frame >= BITE_ANIMATION_FRAMES) {
+                    game->zombies[i].bite_anim_frame = 0;  // Loop animation
+                }
+            }
+
+            // Countdown bite timer
+            game->zombies[i].bite_timer--;
+
+            // Check if bite duration complete
+            if (game->zombies[i].bite_timer <= 0) {
+                // Plant dies!
+                int target_row = game->zombies[i].row;
+                int target_col = game->zombies[i].target_col;
+
+                if (target_col >= 0 && target_col < GRID_COLS) {
+                    PlantType killed_plant = game->grid[target_row][target_col].plant;
+                    game->grid[target_row][target_col].plant = PLANT_NONE;
+                    game->grid[target_row][target_col].animation_frame = 0;
+                    game->grid[target_row][target_col].sun_spawn_counter = 0;
+                    game->grid[target_row][target_col].shoot_counter = 0;
+
+                    printf("Plant at row %d, col %d killed by zombie bite!\n",
+                           target_row, target_col);
+
+                    // Check if any OTHER zombies are also biting this plant
+                    // If so, they should resume walking too
+                    int j;
+                    for (j = 0; j < MAX_ZOMBIES; j++) {
+                        if (j != i && game->zombies[j].active &&
+                            game->zombies[j].state == ZOMBIE_BITING &&
+                            game->zombies[j].row == target_row &&
+                            game->zombies[j].target_col == target_col) {
+                            // This zombie was also biting the same plant
+                            game->zombies[j].state = ZOMBIE_WALKING;
+                            game->zombies[j].target_col = -1;
+                            game->zombies[j].bite_timer = 0;
+                            printf("Zombie %d also resumed walking after plant death\n", j);
+                        }
+                    }
+                }
+
+                // Resume walking
+                game->zombies[i].state = ZOMBIE_WALKING;
+                game->zombies[i].target_col = -1;
+                game->zombies[i].bite_timer = 0;
+                game->zombies[i].animation_frame = 0;  // Reset walk animation
+
+                printf("Zombie %d resumed walking\n", i);
+            }
+            else {
+                // Still biting - check if plant was destroyed by peas
+                int target_row = game->zombies[i].row;
+                int target_col = game->zombies[i].target_col;
+
+                if (target_col >= 0 && target_col < GRID_COLS) {
+                    if (game->grid[target_row][target_col].plant == PLANT_NONE) {
+                        // Plant was destroyed (probably by peas) - resume walking
+                        game->zombies[i].state = ZOMBIE_WALKING;
+                        game->zombies[i].target_col = -1;
+                        game->zombies[i].bite_timer = 0;
+                        game->zombies[i].animation_frame = 0;
+
+                        printf("Zombie %d resumed walking (plant destroyed)\n", i);
+                    }
+                }
             }
         }
     }
@@ -1126,6 +1292,92 @@ void draw_zombie_sprite(u8 *framebuf, int dst_x, int dst_y,
     }
 }
 
+
+/**
+ * Draw bite sprite from sprite sheet with scaling and black transparency
+ * Similar to draw_zombie_sprite but for bite animation
+ * CRITICAL: Does NOT draw in UI protected areas
+ */
+void draw_bite_sprite(u8 *framebuf, int dst_x, int dst_y,
+                      const u8 *sheet_data, int frame_index)
+{
+    int row, col, i, j;
+    int src_x, src_y;
+    u32 fb_idx, sheet_idx;
+    float scale = ZOMBIE_SCALE;
+
+    // Calculate source position in sprite sheet
+    row = frame_index / BITE_COLS;
+    col = frame_index % BITE_COLS;
+    src_x = col * BITE_FRAME_WIDTH;
+    src_y = row * BITE_FRAME_HEIGHT;
+
+    // Boundary check for source
+    if (row >= BITE_ROWS || col >= BITE_COLS)
+        return;
+
+    // UI protection boundary calculations (done once)
+    int seedbank_right = UI_SEEDBANK_X + UI_SEEDBANK_WIDTH;
+    int seedbank_bottom = UI_SEEDBANK_Y + UI_SEEDBANK_HEIGHT;
+    int sunbank_right = UI_SUNBANK_X + UI_SUNBANK_WIDTH;
+    int sunbank_bottom = UI_SUNBANK_Y + UI_SUNBANK_HEIGHT;
+
+    // Apply Y offset for proper positioning
+    int display_y = dst_y + ZOMBIE_Y_OFFSET;
+
+    // Draw scaled sprite with transparency
+    for (i = 0; i < ZOMBIE_DISPLAY_HEIGHT; i++) {
+        for (j = 0; j < ZOMBIE_DISPLAY_WIDTH; j++) {
+            // Calculate destination pixel position
+            int pixel_x = dst_x + j;
+            int pixel_y = display_y + i;
+
+            // Skip if pixel is outside screen
+            if (pixel_x < 0 || pixel_x >= SCREEN_WIDTH ||
+                pixel_y < 0 || pixel_y >= SCREEN_HEIGHT)
+                continue;
+
+            // CRITICAL: Skip if pixel is in UI protected area
+            // Check seedbank
+            if (pixel_x >= UI_SEEDBANK_X && pixel_x < seedbank_right &&
+                pixel_y >= UI_SEEDBANK_Y && pixel_y < seedbank_bottom) {
+                continue;  // Don't draw on seedbank!
+            }
+            // Check sunbank
+            if (pixel_x >= UI_SUNBANK_X && pixel_x < sunbank_right &&
+                pixel_y >= UI_SUNBANK_Y && pixel_y < sunbank_bottom) {
+                continue;  // Don't draw on sunbank!
+            }
+
+            // Calculate source column (inverse scaling)
+            int src_j = (int)(j / scale);
+            if (src_j >= BITE_FRAME_WIDTH)
+                src_j = BITE_FRAME_WIDTH - 1;
+
+            // Calculate source row (inverse scaling)
+            int src_i = (int)(i / scale);
+            if (src_i >= BITE_FRAME_HEIGHT)
+                src_i = BITE_FRAME_HEIGHT - 1;
+
+            // Calculate sprite sheet index
+            sheet_idx = ((src_y + src_i) * BITE_SHEET_WIDTH + (src_x + src_j)) * 3;
+
+            // Check for BLACK background (0, 0, 0) - skip transparent pixels
+            if (sheet_data[sheet_idx] == 0 &&
+                sheet_data[sheet_idx + 1] == 0 &&
+                sheet_data[sheet_idx + 2] == 0) {
+                continue;
+            }
+
+            // Draw pixel
+            fb_idx = (pixel_y * SCREEN_WIDTH + pixel_x) * 3;
+            framebuf[fb_idx]     = sheet_data[sheet_idx];
+            framebuf[fb_idx + 1] = sheet_data[sheet_idx + 1];
+            framebuf[fb_idx + 2] = sheet_data[sheet_idx + 2];
+        }
+    }
+}
+
 /**
  * Draw all zombies with dirty rect optimization
  * Uses two-phase approach: erase all, then draw all
@@ -1208,8 +1460,14 @@ void game_draw_zombies(GameState *game, u8 *framebuf)
 
                     if (rects_overlap(erase_x, erase_y, erase_w, erase_h,
                                     other_x, other_y, ZOMBIE_DISPLAY_WIDTH, ZOMBIE_DISPLAY_HEIGHT)) {
-                        draw_zombie_sprite(framebuf, (int)game->zombies[k].x, (int)game->zombies[k].y,
-                                         gImage_walk_ani, game->zombies[k].animation_frame);
+                        // Draw appropriate sprite based on state
+                        if (game->zombies[k].state == ZOMBIE_WALKING) {
+                            draw_zombie_sprite(framebuf, (int)game->zombies[k].x, (int)game->zombies[k].y,
+                                             gImage_walk_ani, game->zombies[k].animation_frame);
+                        } else if (game->zombies[k].state == ZOMBIE_BITING) {
+                            draw_bite_sprite(framebuf, (int)game->zombies[k].x, (int)game->zombies[k].y,
+                                           gImage_bite_ani, game->zombies[k].bite_anim_frame);
+                        }
                     }
                 }
             }
@@ -1222,9 +1480,14 @@ void game_draw_zombies(GameState *game, u8 *framebuf)
             int curr_x = (int)game->zombies[i].x;
             int curr_y = (int)game->zombies[i].y;
 
-            // Draw zombie sprite
-            draw_zombie_sprite(framebuf, curr_x, curr_y,
-                             gImage_walk_ani, game->zombies[i].animation_frame);
+            // Draw appropriate sprite based on zombie state
+            if (game->zombies[i].state == ZOMBIE_WALKING) {
+                draw_zombie_sprite(framebuf, curr_x, curr_y,
+                                 gImage_walk_ani, game->zombies[i].animation_frame);
+            } else if (game->zombies[i].state == ZOMBIE_BITING) {
+                draw_bite_sprite(framebuf, curr_x, curr_y,
+                               gImage_bite_ani, game->zombies[i].bite_anim_frame);
+            }
 
             // Update position tracking
             game->zombies[i].prev_x = curr_x;
@@ -1443,8 +1706,14 @@ void game_draw_peas(GameState *game, u8 *framebuf)
 
                     if (rects_overlap(erase_x, erase_y, erase_w, erase_h,
                                     zombie_x, zombie_y, ZOMBIE_DISPLAY_WIDTH, ZOMBIE_DISPLAY_HEIGHT)) {
-                        draw_zombie_sprite(framebuf, (int)game->zombies[j].x, (int)game->zombies[j].y,
-                                         gImage_walk_ani, game->zombies[j].animation_frame);
+                        // Draw appropriate sprite based on state
+                        if (game->zombies[j].state == ZOMBIE_WALKING) {
+                            draw_zombie_sprite(framebuf, (int)game->zombies[j].x, (int)game->zombies[j].y,
+                                             gImage_walk_ani, game->zombies[j].animation_frame);
+                        } else if (game->zombies[j].state == ZOMBIE_BITING) {
+                            draw_bite_sprite(framebuf, (int)game->zombies[j].x, (int)game->zombies[j].y,
+                                           gImage_bite_ani, game->zombies[j].bite_anim_frame);
+                        }
                     }
                 }
             }
@@ -1474,4 +1743,293 @@ void game_draw_peas(GameState *game, u8 *framebuf)
             game->peas[i].prev_y = -1;
         }
     }
+}
+
+
+/* ============================================================ */
+/*   COMPLETE ADDITIONS FOR pvz_game.c (BUG-FIXED VERSION)    */
+/*   Add these at the END of the file (after line 1713)       */
+/* ============================================================ */
+
+/**
+ * Check if any zombie has breached the left boundary (game over condition)
+ * Returns: 1 if game over, 0 if still playing
+ */
+int game_check_defeat(GameState *game)
+{
+    int i;
+
+    // Only check during normal gameplay
+    if (game->play_state != GAME_PLAYING) {
+        return 0;
+    }
+
+    // Check if any zombie has crossed the left boundary
+    for (i = 0; i < MAX_ZOMBIES; i++) {
+        if (game->zombies[i].active) {
+            // Check if zombie x position is less than grid start (breached left boundary)
+            if (game->zombies[i].x < GRID_START_X) {
+                printf("GAME OVER! Zombie breached left boundary at x=%.1f\n", game->zombies[i].x);
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Trigger game defeat sequence
+ * Called when a zombie breaches the left boundary
+ */
+void game_trigger_defeat(GameState *game)
+{
+    int i;
+
+    printf("Triggering defeat sequence...\n");
+
+    // Change game state to fading to black
+    game->play_state = GAME_FADING_TO_BLACK;
+    game->game_over_timer = 0;
+    game->fade_progress = 0.0f;
+    game->defeat_scale = DEFEAT_MIN_SCALE;
+
+    // Make all zombies that crossed the boundary start biting
+    for (i = 0; i < MAX_ZOMBIES; i++) {
+        if (game->zombies[i].active && game->zombies[i].x < GRID_START_X) {
+            game->zombies[i].state = ZOMBIE_BITING;
+            game->zombies[i].bite_timer = BITE_DURATION;
+            game->zombies[i].bite_anim_frame = 0;
+            game->zombies[i].target_col = 0; // Biting at the left edge
+            printf("Zombie %d started biting at left boundary\n", i);
+        }
+    }
+}
+
+/**
+ * Update game over animation state
+ * Handles fade to black, defeat image scaling, and game restart
+ * Call this every tick when game is over
+ */
+void game_update_gameover(GameState *game)
+{
+    game->game_over_timer++;
+
+    switch (game->play_state) {
+        case GAME_FADING_TO_BLACK:
+            // Fade to black over FADE_TO_BLACK_DURATION ticks (2 seconds)
+            game->fade_progress = (float)game->game_over_timer / (float)FADE_TO_BLACK_DURATION;
+
+            if (game->fade_progress >= 1.0f) {
+                game->fade_progress = 1.0f;
+                game->play_state = GAME_SHOWING_DEFEAT;
+                game->game_over_timer = 0;
+                printf("Fade complete, showing defeat image...\n");
+            }
+            break;
+
+        case GAME_SHOWING_DEFEAT:
+            // Scale defeat image from 2% to 100% over DEFEAT_SCALE_DURATION ticks (1.5 seconds)
+            game->defeat_scale = DEFEAT_MIN_SCALE +
+                ((DEFEAT_MAX_SCALE - DEFEAT_MIN_SCALE) * (float)game->game_over_timer / (float)DEFEAT_SCALE_DURATION);
+
+            if (game->defeat_scale >= DEFEAT_MAX_SCALE) {
+                game->defeat_scale = DEFEAT_MAX_SCALE;
+                game->play_state = GAME_RESTARTING;
+                game->game_over_timer = 0;
+                printf("Defeat image complete, restarting in 2 seconds...\n");
+            }
+            break;
+
+        case GAME_RESTARTING:
+            // Wait 2 seconds before restarting
+            if (game->game_over_timer >= 200) { // 2 seconds at 100Hz
+                printf("Restarting game...\n");
+                game_reset(game);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+/**
+ * Draw fade to black effect over the current framebuffer
+ * Darkens all pixels progressively
+ * progress: 0.0 (no fade) to 1.0 (completely black)
+ */
+void game_draw_fade_to_black(u8 *framebuf, float progress)
+{
+    int i;
+    int total_pixels = SCREEN_WIDTH * SCREEN_HEIGHT;
+    int fade_factor = (int)(progress * 256.0f); // 0-256
+
+    if (fade_factor > 256) fade_factor = 256;
+    if (fade_factor <= 0) return;
+
+    // Darken all pixels by reducing RGB values
+    // Using bit shift for fast division by 256
+    for (i = 0; i < total_pixels; i++) {
+        int idx = i * 3;
+
+        // Reduce each color channel
+        int b = framebuf[idx];
+        int g = framebuf[idx + 1];
+        int r = framebuf[idx + 2];
+
+        // Apply fade: pixel = pixel * (1 - progress)
+        // Using integer arithmetic for speed: pixel * (256 - fade_factor) / 256
+        b = (b * (256 - fade_factor)) >> 8;
+        g = (g * (256 - fade_factor)) >> 8;
+        r = (r * (256 - fade_factor)) >> 8;
+
+        framebuf[idx]     = (u8)b;
+        framebuf[idx + 1] = (u8)g;
+        framebuf[idx + 2] = (u8)r;
+    }
+}
+
+/**
+ * Fill framebuffer with black color
+ * Used to clear screen before showing defeat image
+ */
+void game_fill_black(u8 *framebuf)
+{
+    memset(framebuf, 0, SCREEN_WIDTH * SCREEN_HEIGHT * 3);
+}
+
+/**
+ * Draw defeat image scaled from center
+ * Uses nearest neighbor sampling for speed
+ * scale: 0.02 (2% size) to 1.0 (100% size)
+ *
+ * BUG FIX: Added checks to prevent division by zero
+ * BUG FIX: Added minimum size check
+ */
+void game_draw_defeat_image(u8 *framebuf, float scale)
+{
+    extern const unsigned char gImage_ZombiesWon_ani[];
+
+    int i, j;
+    int scaled_w = (int)(DEFEAT_IMAGE_WIDTH * scale);
+    int scaled_h = (int)(DEFEAT_IMAGE_HEIGHT * scale);
+
+    // BUG FIX: Prevent zero or negative dimensions
+    if (scaled_w < 1) scaled_w = 1;
+    if (scaled_h < 1) scaled_h = 1;
+
+    // Calculate center position (image grows from center)
+    int dst_x = (SCREEN_WIDTH - scaled_w) / 2;
+    int dst_y = (SCREEN_HEIGHT - scaled_h) / 2;
+
+    // Boundary check
+    if (dst_x < 0) dst_x = 0;
+    if (dst_y < 0) dst_y = 0;
+    if (dst_x + scaled_w > SCREEN_WIDTH) scaled_w = SCREEN_WIDTH - dst_x;
+    if (dst_y + scaled_h > SCREEN_HEIGHT) scaled_h = SCREEN_HEIGHT - dst_y;
+
+    // BUG FIX: Double check after boundary adjustment
+    if (scaled_w < 1 || scaled_h < 1) return;
+
+    // Draw scaled image using nearest neighbor sampling (fast)
+    for (i = 0; i < scaled_h; i++) {
+        for (j = 0; j < scaled_w; j++) {
+            // Map destination pixel to source pixel
+            int src_x = (j * DEFEAT_IMAGE_WIDTH) / scaled_w;
+            int src_y = (i * DEFEAT_IMAGE_HEIGHT) / scaled_h;
+
+            // Clamp source coordinates (safety check)
+            if (src_x >= DEFEAT_IMAGE_WIDTH) src_x = DEFEAT_IMAGE_WIDTH - 1;
+            if (src_y >= DEFEAT_IMAGE_HEIGHT) src_y = DEFEAT_IMAGE_HEIGHT - 1;
+            if (src_x < 0) src_x = 0;
+            if (src_y < 0) src_y = 0;
+
+            int fb_idx = ((dst_y + i) * SCREEN_WIDTH + (dst_x + j)) * 3;
+            int src_idx = (src_y * DEFEAT_IMAGE_WIDTH + src_x) * 3;
+
+            // BUG FIX: Add bounds check for framebuffer index
+            if (fb_idx >= 0 && fb_idx + 2 < SCREEN_WIDTH * SCREEN_HEIGHT * 3) {
+                framebuf[fb_idx]     = gImage_ZombiesWon_ani[src_idx];
+                framebuf[fb_idx + 1] = gImage_ZombiesWon_ani[src_idx + 1];
+                framebuf[fb_idx + 2] = gImage_ZombiesWon_ani[src_idx + 2];
+            }
+        }
+    }
+}
+
+/**
+ * Reset game to initial state (called after game over)
+ * Clears all game entities and restarts from beginning
+ */
+void game_reset(GameState *game)
+{
+    int i, j;
+
+    printf("Resetting game...\n");
+
+    // Reset basic state
+    game->sun_count = 150;
+    game->selected_card = -1;
+    game->animation_counter = 0;
+    game->prev_sun_count = 150;
+    game->prev_selected_card = -1;
+    game->num_active_suns = 0;
+
+    // Reset cards
+    game->cards[0].type = PLANT_SUNFLOWER;
+    game->cards[0].cost = SUNFLOWER_COST;
+    game->cards[0].selected = 0;
+
+    game->cards[1].type = PLANT_PEASHOOTER;
+    game->cards[1].cost = PEASHOOTER_COST;
+    game->cards[1].selected = 0;
+
+    // Clear grid
+    for (i = 0; i < GRID_ROWS; i++) {
+        for (j = 0; j < GRID_COLS; j++) {
+            game->grid[i][j].plant = PLANT_NONE;
+            game->grid[i][j].animation_frame = 0;
+            game->grid[i][j].sun_spawn_counter = 0;
+            game->grid[i][j].shoot_counter = 0;
+        }
+    }
+
+    // Clear suns
+    for (i = 0; i < MAX_SUNS; i++) {
+        game->suns[i].active = 0;
+        game->suns[i].prev_x = -1;
+    }
+
+    // Clear zombies
+    game->num_active_zombies = 0;
+    game->zombie_spawn_counter = 0;
+    game->zombie_animation_counter = 0;
+    game->bite_animation_counter = 0;
+    for (i = 0; i < MAX_ZOMBIES; i++) {
+        game->zombies[i].active = 0;
+        game->zombies[i].prev_x = -1;
+        game->zombies[i].prev_y = -1;
+        game->zombies[i].health = 0;
+        game->zombies[i].state = ZOMBIE_WALKING;
+        game->zombies[i].target_col = -1;
+        game->zombies[i].bite_timer = 0;
+        game->zombies[i].bite_anim_frame = 0;
+    }
+
+    // Clear peas
+    game->num_active_peas = 0;
+    for (i = 0; i < MAX_PEAS; i++) {
+        game->peas[i].active = 0;
+        game->peas[i].prev_x = -1;
+        game->peas[i].prev_y = -1;
+    }
+
+    // Reset game over state to playing
+    game->play_state = GAME_PLAYING;
+    game->game_over_timer = 0;
+    game->fade_progress = 0.0f;
+    game->defeat_scale = DEFEAT_MIN_SCALE;
+
+    printf("Game reset complete\n");
 }
